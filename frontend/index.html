@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>工作区文档 Agent</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!--
+      Startup diagnostics. Without this, any failure while the module graph loads or
+      while Vue mounts produces a blank white page with no indication of the cause --
+      in dev that usually means a stale dependency cache or a module that failed to
+      transform. This surfaces the reason instead of silently rendering nothing.
+    -->
+    <script>
+      (function () {
+        var problems = []
+
+        function report() {
+          var app = document.getElementById('app')
+          if (!app || app.children.length > 0 || problems.length === 0) return
+          app.innerHTML =
+            '<div style="font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif;' +
+            'max-width:760px;margin:80px auto;padding:24px 28px;border:1px solid #fecaca;border-radius:12px;' +
+            'background:#fef2f2;color:#7f1d1d">' +
+            '<div style="font-size:16px;font-weight:600;margin-bottom:12px">页面加载失败</div>' +
+            '<div style="margin-bottom:12px;color:#991b1b">前端服务在运行，但页面脚本执行出错。' +
+            '开发环境下最常见的原因是依赖预打包缓存过期。</div>' +
+            '<pre style="white-space:pre-wrap;word-break:break-all;background:#fff;border:1px solid #fecaca;' +
+            'border-radius:8px;padding:12px;font-size:12px;margin:0 0 14px">' +
+            problems.join('\n\n').replace(/</g, '&lt;') +
+            '</pre>' +
+            '<div style="color:#991b1b">修复方式：停止前端进程，删除 <code>frontend/node_modules/.vite</code>，' +
+            '再执行 <code>npm run dev</code>。</div>' +
+            '</div>'
+        }
+
+        window.addEventListener('error', function (event) {
+          problems.push(
+            'Error: ' + (event.message || 'unknown') +
+            (event.filename ? '\n  at ' + event.filename + ':' + event.lineno : '')
+          )
+        })
+
+        window.addEventListener('unhandledrejection', function (event) {
+          problems.push('Unhandled rejection: ' + (event.reason && event.reason.message ? event.reason.message : event.reason))
+        })
+
+        window.addEventListener('DOMContentLoaded', function () {
+          setTimeout(report, 3000)
+        })
+      })()
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      # Workspaces, backups, and the vector index all live here.
+      - ./data:/app/data
+      # Local embedding / reranking weights, mounted read-only. The paths in .env
+      # must be the in-container paths (/models/bge-m3, /models/bge-reranker-v2-m3)
+      # when running under Docker; set EMBEDDING_PROVIDER=dashscope to skip this.
+      - ${LOCAL_MODELS_DIR:-C:/code/agent/rag/models}:/models:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped

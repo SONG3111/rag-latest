@@ -1,0 +1,37 @@
+# --- web ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# --- data ---
+sqlalchemy>=2.0
+pydantic>=2.7
+pydantic-settings>=2.3
+httpx>=0.27
+
+# --- agent orchestration ---
+langgraph>=0.2.60
+langchain-core>=0.3.25
+langchain-openai>=0.3.0
+langchain-mcp-adapters>=0.1.0
+mcp[cli]>=1.10.1
+
+# --- document tooling (shared with the MCP server) ---
+openpyxl>=3.1.5
+python-docx>=1.1.2
+python-dateutil>=2.9
+
+# --- retrieval ---
+qdrant-client>=1.12
+jieba>=0.42.1
+
+# --- local embedding / reranking (used when EMBEDDING_PROVIDER=local
+#     or RERANKER_PROVIDER=local-bge) ---
+langchain-huggingface>=0.1
+sentence-transformers>=3.0
+transformers>=4.41
+
+# --- dev / test ---
+pytest>=8.0
+pytest-asyncio>=0.24
+anyio>=4.4
