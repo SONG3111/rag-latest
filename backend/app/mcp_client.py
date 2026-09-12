@@ -266,7 +266,14 @@ def parse_tool_result(result: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return {"ok": True, "data": {"raw": text}}
+        # Every tool in the office server answers with the {"ok": ...} JSON envelope;
+        # plain text here means the framework itself failed (e.g. FastMCP wrapping an
+        # OSError as "Error executing tool ..."). Treating that as ok:True once marked
+        # failed writes as applied — the file was never touched.
+        return {
+            "ok": False,
+            "error": {"code": "unstructured_result", "message": text[:500]},
+        }
 
     if isinstance(parsed, dict):
         return parsed

@@ -78,8 +78,11 @@ class Settings(BaseSettings):
     rerank_score_threshold: float = Field(default=0.02)
 
     # --- retrieval ---
-    chunk_size: int = Field(default=700)
-    chunk_overlap: int = Field(default=80)
+    # Word body children are sized in *tokens*, measured with the embedding
+    # model's own tokenizer, so a chunk's encoded length is what the vector
+    # store actually sees. bge-m3 guidance puts retrieval units at <=512 tokens.
+    chunk_size_tokens: int = Field(default=512)
+    chunk_overlap_tokens: int = Field(default=64)
     retrieval_vector_top_k: int = Field(default=20)
     retrieval_bm25_top_k: int = Field(default=20)
     rerank_candidates: int = Field(default=20)
@@ -111,6 +114,18 @@ class Settings(BaseSettings):
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("chunk_overlap_tokens")
+    @classmethod
+    def _overlap_must_fit_in_chunk(cls, value: int, info) -> int:
+        # A hand-splitter would silently misbehave; fail fast instead.
+        chunk_size = info.data.get("chunk_size_tokens")
+        if chunk_size is not None and value >= chunk_size:
+            raise ValueError(
+                f"CHUNK_OVERLAP_TOKENS ({value}) must be smaller than "
+                f"CHUNK_SIZE_TOKENS ({chunk_size})"
+            )
         return value
 
     # --- derived paths ---

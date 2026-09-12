@@ -62,6 +62,18 @@ class WriteConflict(ToolError):
     code = "write_conflict"
 
 
+class FileLocked(ToolError):
+    """Raised when the OS refuses the write because the file is open elsewhere."""
+
+    code = "file_locked"
+
+
+class CalculationError(ToolError):
+    """Raised when an expression or workbook formula cannot be evaluated."""
+
+    code = "calculation_failed"
+
+
 def error_payload(exc: ToolError) -> dict:
     """Serialize a ToolError into the standard tool response envelope."""
     return {

@@ -27,3 +27,10 @@ Thumbs.db
 
 # --- tooling ---
 .mimosa/
+.zcode/
+wid_tmp.txt
+
+docs/
+
+# --- regenerable manual test data (scripts/make_manual_test_files.py) ---
+testdata/

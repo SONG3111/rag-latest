@@ -20,6 +20,9 @@ mcp[cli]>=1.10.1
 openpyxl>=3.1.5
 python-docx>=1.1.2
 python-dateutil>=2.9
+# Imported directly for proposal rebasing (formula reference shifting);
+# the MCP subprocess runs from this same package.
+mcp-office-server>=0.1.0
 
 # --- retrieval ---
 qdrant-client>=1.12
@@ -30,6 +33,9 @@ jieba>=0.42.1
 langchain-huggingface>=0.1
 sentence-transformers>=3.0
 transformers>=4.41
+
+# --- chunking ---
+langchain-text-splitters>=0.2
 
 # --- dev / test ---
 pytest>=8.0

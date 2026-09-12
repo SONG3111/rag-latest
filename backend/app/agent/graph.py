@@ -35,20 +35,25 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import RemoveMessage, add_messages
 from sqlalchemy.orm import Session
 
+from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolCallRequest, ToolInvocationError
+from pydantic import ValidationError
+
 from ..config import Settings, get_settings
 from ..mcp_client import McpOfficeClient, parse_tool_result
 from ..models import Operation, Workspace
 from ..retrieval.pipeline import Retriever
 from ..services.operations import (
-    OperationError,
     build_tool_arguments,
     create_operation,
+    extract_target_path,
     workspace_relative_path,
 )
 from .prompts import (
     EMPTY_ANSWER_NUDGE,
     FRESHNESS_NUDGE,
     KNOWLEDGE_TOOL_DESCRIPTION,
+    PROPOSAL_NUDGE,
     SYSTEM_PROMPT,
     stale_files_notice,
 )
@@ -61,6 +66,100 @@ KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
 # is the signature of an answer that is quoting file content. Two digits rather than
 # one keeps "我可以帮你做 1) 读取 2) 修改" from triggering a pointless extra round trip.
 VALUE_CLAIM_PATTERN = re.compile(r"\d{2,}|\|")
+
+# The answer announces a submitted proposal. Legitimate after a write tool ran (the
+# state then carries proposals); a claim with zero proposals this turn means the model
+# replayed the approval phrasing from history instead of calling the tool.
+PROPOSAL_CLAIM_PATTERN = re.compile(r"已提交[^。\n]{0,20}提案")
+
+# Guardrail hints (LangChain ToolNode style): a failed tool result is enriched with
+# an actionable Chinese correction keyed by the error code, so the model fixes the
+# arguments instead of re-reading an English message and guessing.
+_TOOL_ERROR_HINTS: dict[str | None, str] = {
+    "document_not_found": (
+        "工作区里没有这个文件。不要自己缩写或猜测文件名——"
+        "先调用 list_files，用返回的 path 原样重试。"
+    ),
+    "sheet_not_found": (
+        "工作表名称不对。error.detail 里列出了所有可用的工作表名，请原样使用其一重试。"
+    ),
+    "file_locked": (
+        "文件正被 Excel/WPS 占用。请先告知用户关闭文件；用户关闭后用相同参数重试即可。"
+    ),
+    "write_conflict": (
+        "文件在你读取之后又被修改过（常见原因：你上一条提案刚被应用）。"
+        "请重新 read_range 获取最新内容，再重新提交提案。"
+    ),
+    "invalid_range": (
+        "参数越界：行号从 1 开始、count ≥ 1，且不要超出 read_range 返回的 "
+        "sheet_max_row。请核对后重试。"
+    ),
+    "calculation_failed": (
+        "算式或公式无法计算。工作簿公式必须带 path（和 sheet_name）并用 "
+        "Excel 公式语法（如 =SUM(B2:D2)）；纯算式只能包含数字与四则运算。"
+        "请修正后重试。"
+    ),
+    "invalid_proposal": "提案无法创建：请先用读取类工具确认文件路径、工作表与单元格，再重试。",
+    "invalid_arguments": "参数不完整或类型不对。请对照该工具的参数说明修正后重试。",
+    "unstructured_result": "工具执行出现意外错误。请检查参数后重试；如反复失败，请向用户说明。",
+    "corrupt_document": "文件无法解析，可能已损坏。请告知用户重新上传。",
+    "tool_failed": "工具执行失败。请检查参数后重试；如反复失败，请向用户说明原因。",
+    None: "工具执行失败。请检查参数后重试；如反复失败，请向用户说明原因。",
+}
+
+_REPEAT_SUFFIX = (
+    "（注意：你已用完全相同的参数连续失败 {n} 次。不要原样重试——"
+    "先用读取类工具核实正确参数，或如实告知用户该操作无法完成。）"
+)
+
+
+def _with_error_hint(payload: dict[str, Any], *, failure_repeats: int = 0) -> dict[str, Any]:
+    """Attach a Chinese correction hint to a failed tool result."""
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return payload
+    hint = _TOOL_ERROR_HINTS.get(error.get("code"), _TOOL_ERROR_HINTS[None])
+    if failure_repeats >= 2:
+        hint = f"{hint} {_REPEAT_SUFFIX.format(n=failure_repeats)}"
+    error["hint"] = hint
+    return payload
+
+
+def _failure_signature(name: str, call_args: dict[str, Any]) -> str:
+    try:
+        return f"{name}|{json.dumps(call_args, ensure_ascii=False, sort_keys=True, default=str)[:300]}"
+    except (TypeError, ValueError):
+        return f"{name}|{call_args!r}"
+
+
+def _format_tool_error(exc: Exception) -> str:
+    """LangGraph ToolNode error handler (handle_tool_errors=callable).
+
+    The returned string becomes the ToolMessage content verbatim, so failures are
+    formatted as the same JSON envelope successful tools use — with a Chinese
+    message the model can act on instead of a raw traceback.
+    """
+    if isinstance(exc, ToolInvocationError):
+        errors = exc.filtered_errors or []
+        detail = "; ".join(
+            f"{'.'.join(str(loc) for loc in e.get('loc', ()))}: {e.get('msg', '')}"
+            for e in errors
+        ) or str(exc.source)
+        payload = {
+            "ok": False,
+            "error": {
+                "code": "invalid_arguments",
+                "message": f"参数不符合工具「{exc.tool_name}」的要求: {detail}；请修正后重试",
+            },
+        }
+    elif isinstance(exc, ToolProposalError):
+        payload = {"ok": False, "error": {"code": "invalid_proposal", "message": str(exc)}}
+    else:
+        payload = {
+            "ok": False,
+            "error": {"code": "tool_failed", "message": f"工具执行失败: {exc}；请检查参数后重试"},
+        }
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 # Statements about the workspace's documents, as opposed to small talk. Used to decide
 # whether an ungrounded answer is worth sending back for a fresh read.
@@ -81,6 +180,8 @@ class AgentState(TypedDict):
     proposals: list[dict]
     tool_calls_made: int
     nudges: int
+    last_failure: str | None
+    failure_repeats: int
 
 
 @dataclass
@@ -209,7 +310,82 @@ class WorkspaceAgent:
         )
 
     def build_tools(self) -> list[BaseTool]:
-        return [self._knowledge_tool(), *self.client.tools()]
+        tools: list[BaseTool] = [self._knowledge_tool()]
+        self._gated_write_names: set[str] = set()
+        for tool in self.client.tools():
+            if self.client.requires_approval(tool.name):
+                # A write tool that never executes: the framework ToolNode runs
+                # whatever it is handed, so the approval gate is packed into a
+                # proxy tool that records a proposal and returns the
+                # pending-approval payload without ever touching the file.
+                tools.append(self._gated_write_tool(tool))
+                self._gated_write_names.add(tool.name)
+            else:
+                tools.append(tool)
+        return tools
+
+    async def _prefix_tool_paths(self, request: ToolCallRequest, execute):
+        """Prefix model paths with the workspace id before a tool runs.
+
+        The MCP sandbox root is the shared workspaces directory, so every path
+        the model emits is workspace-relative and must be prefixed on its way to
+        a tool — except for gated write tools, which never touch the filesystem
+        and whose proposals store workspace-relative paths.
+        """
+        call = dict(request.tool_call)
+        if call.get("name") not in self._gated_write_names:
+            call["args"] = build_tool_arguments(self.workspace.id, call.get("args") or {})
+        return await execute(request.override(tool_call=call))
+
+    def _gated_write_tool(self, tool: BaseTool) -> BaseTool:
+        agent = self
+        name = tool.name
+
+        async def propose(**kwargs: Any) -> str:
+            enriched = agent._enrich_arguments(name, kwargs)
+            # Validate the target before recording anything: models occasionally
+            # shorten or mix up file names, and an unvalidated path would become
+            # a proposal that can never be applied. A structured rejection here
+            # lets the model retry with the exact path from its earlier reads.
+            from ..services.files import resolve_workspace_path
+
+            rel_path = extract_target_path(enriched)
+            try:
+                target = resolve_workspace_path(agent.workspace.id, rel_path)
+            except Exception as exc:
+                raise ToolProposalError(f"工作区里找不到文件「{rel_path}」: {exc}") from exc
+            if not target.exists():
+                raise ToolProposalError(
+                    f"工作区里不存在文件「{rel_path}」；"
+                    "请改用本轮 list_files / read_range 返回的确切路径重新提交提案"
+                )
+            diff = await agent._read_before_values(name, enriched)
+            operation = create_operation(
+                agent.session, agent.workspace.id, name, enriched, diff=diff
+            )
+            agent.session.flush()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "status": "pending_user_approval",
+                        "operation_id": operation.id,
+                        "tool": name,
+                        "path": operation.rel_path,
+                        "summary": operation.summary,
+                        "diff": diff,
+                    },
+                    "note": "该修改已提交为待确认提案，尚未写入文件。",
+                },
+                ensure_ascii=False,
+            )
+
+        return StructuredTool.from_function(
+            coroutine=propose,
+            name=name,
+            description=tool.description,
+            args_schema=tool.args_schema,
+        )
 
     def _scope_listing(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Keep only the active workspace's files in a ``list_files`` result.
@@ -264,7 +440,15 @@ class WorkspaceAgent:
     # ------------------------------------------------------------------ #
     def _build_graph(self):
         tools = self.build_tools()
-        tool_map = {tool.name: tool for tool in tools}
+        # The framework node validates args against each tool's schema, runs the
+        # calls, catches unknown tool names and failures, and formats errors via
+        # our handler (handle_tool_errors=callable).
+        self._tool_node = ToolNode(
+            tools,
+            name="tools",
+            handle_tool_errors=_format_tool_error,
+            awrap_tool_call=self._prefix_tool_paths,
+        )
         llm_with_tools = self.llm.bind_tools(tools)
         max_iterations = self.settings.agent_max_iterations
 
@@ -295,9 +479,15 @@ class WorkspaceAgent:
             }
 
         async def tools_node(state: AgentState) -> dict[str, Any]:
-            # Find the most recent AI message that requested tools. Walking backwards
-            # rather than taking the tail keeps this correct regardless of how the
-            # message reducer orders the accumulated state.
+            # The framework ToolNode validates arguments against each tool's
+            # schema, executes the calls, and routes unknown tool names,
+            # validation errors and failures through _format_tool_error.
+            # Everything project-specific — workspace scoping, citations,
+            # proposal events, repeat-failure escalation — is post-processing
+            # on the messages it returns.
+            update = await self._tool_node.ainvoke(state)
+            messages = list(update.get("messages") or [])
+
             pending = next(
                 (
                     message
@@ -306,105 +496,43 @@ class WorkspaceAgent:
                 ),
                 None,
             )
-            if pending is None:
-                return {"messages": []}
 
-            outputs: list[BaseMessage] = []
+            last_failure = state.get("last_failure")
+            failure_repeats = state.get("failure_repeats", 0)
             proposals: list[dict] = []
             citations: list[dict] = list(state.get("citations") or [])
 
-            for call in getattr(pending, "tool_calls", []) or []:
-                name = call.get("name", "")
-                args = call.get("args") or {}
-                tool = tool_map.get(name)
-
-                if tool is None:
-                    outputs.append(
-                        ToolMessage(
-                            content=json.dumps(
-                                {"ok": False, "error": {"code": "unknown_tool", "message": name}},
-                                ensure_ascii=False,
-                            ),
-                            tool_call_id=call.get("id", ""),
-                        )
-                    )
+            for message in messages:
+                if not isinstance(message, ToolMessage):
                     continue
+                name = message.name or ""
+                payload = parse_tool_result(message.content)
 
-                # Gate: a write becomes a proposal instead of an invocation. Only
-                # MCP-provided tools are governed here; locally defined tools such as
-                # the knowledge-base search are read-only by construction.
-                if self.client.is_governed_tool(name) and self.client.requires_approval(name):
-                    try:
-                        proposal, operation = await self._propose(name, args)
-                    except (OperationError, ToolProposalError) as exc:
-                        logger.warning("cannot propose %s: %s", name, exc)
-                        outputs.append(
-                            ToolMessage(
-                                content=json.dumps(
-                                    {
-                                        "ok": False,
-                                        "error": {
-                                            "code": "invalid_proposal",
-                                            "message": str(exc),
-                                        },
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                                tool_call_id=call.get("id", ""),
-                            )
-                        )
-                        continue
-                    proposals.append(proposal)
-                    outputs.append(
-                        ToolMessage(
-                            content=json.dumps(
-                                {
-                                    "ok": True,
-                                    "data": {
-                                        "status": "pending_user_approval",
-                                        "operation_id": operation.id,
-                                        "summary": operation.summary,
-                                    },
-                                    "note": "该修改已提交为待确认提案，尚未写入文件。",
-                                },
-                                ensure_ascii=False,
-                            ),
-                            tool_call_id=call.get("id", ""),
-                        )
-                    )
-                    continue
+                if payload.get("ok") is False:
+                    # Correlate the failure with its call args: identical args
+                    # failing again means the model is spinning, not adapting.
+                    call_args: dict[str, Any] = {}
+                    for call in getattr(pending, "tool_calls", None) or []:
+                        if call.get("id") == message.tool_call_id:
+                            call_args = call.get("args") or {}
+                            break
+                    signature = _failure_signature(name, call_args)
+                    failure_repeats = failure_repeats + 1 if last_failure == signature else 1
+                    last_failure = signature
+                    payload = _with_error_hint(payload, failure_repeats=failure_repeats)
+                else:
+                    last_failure, failure_repeats = None, 0
 
-                try:
-                    # MCP tools are async-only: StructuredTool raises on sync invocation.
-                    # Paths are rewritten because the sandbox root is the shared
-                    # workspaces directory, not the individual workspace.
-                    raw = await tool.ainvoke(
-                        build_tool_arguments(self.workspace.id, args)
-                        if self.client.is_governed_tool(name)
-                        else args
-                    )
-                except Exception as exc:
-                    logger.warning("tool %s failed: %s", name, exc)
-                    outputs.append(
-                        ToolMessage(
-                            content=json.dumps(
-                                {"ok": False, "error": {"code": "tool_failed", "message": str(exc)}},
-                                ensure_ascii=False,
-                            ),
-                            tool_call_id=call.get("id", ""),
-                        )
-                    )
-                    continue
-
-                payload = parse_tool_result(raw)
-                if name == "list_files":
+                if name == "list_files" and payload.get("ok"):
                     payload = self._scope_listing(payload)
+
+                data = payload.get("data") or {}
                 if name == KNOWLEDGE_TOOL_NAME and payload.get("ok"):
                     # Reuse the same citation shape the REST layer emits, so the UI
                     # and the persisted message never disagree about field names.
                     from ..retrieval.pipeline import RetrievedChunk
 
-                    for item in (payload.get("data") or {}).get("results", []):
+                    for item in (data or {}).get("results", []):
                         citations.append(
                             RetrievedChunk(
                                 chunk_id="",
@@ -416,18 +544,29 @@ class WorkspaceAgent:
                             ).to_citation()
                         )
 
-                outputs.append(
-                    ToolMessage(
-                        content=json.dumps(payload, ensure_ascii=False, default=str),
-                        tool_call_id=call.get("id", ""),
-                    )
+                if isinstance(data, dict) and data.get("status") == "pending_user_approval":
+                    proposals.append({
+                        "operation_id": data.get("operation_id"),
+                        "tool": name,
+                        "summary": data.get("summary"),
+                        "path": data.get("path"),
+                        "diff": data.get("diff") or [],
+                    })
+
+                # Replace the message so hints and scoping are what the client sees.
+                messages[messages.index(message)] = ToolMessage(
+                    content=json.dumps(payload, ensure_ascii=False, default=str),
+                    tool_call_id=message.tool_call_id,
+                    name=name,
                 )
 
             return {
-                "messages": outputs,
+                "messages": messages,
                 "proposals": proposals,
                 "citations": citations,
-                "tool_calls_made": state.get("tool_calls_made", 0) + len(pending.tool_calls or []),
+                "tool_calls_made": state.get("tool_calls_made", 0) + len(messages),
+                "last_failure": last_failure,
+                "failure_repeats": failure_repeats,
             }
 
         def should_continue(state: AgentState) -> str:
@@ -457,23 +596,40 @@ class WorkspaceAgent:
                 and DOCUMENT_HINT_PATTERN.search(_message_text(last.content))
             ):
                 return "nudge"
+            # The answer claims a proposal was submitted, but no write tool ran
+            # this turn: the model replayed the approval phrasing from history,
+            # and the user's pending panel would stay empty. One nudge makes it
+            # actually read the file and call the write tool.
+            if (
+                state.get("nudges", 0) == 0
+                and isinstance(last, AIMessage)
+                and not state.get("proposals")
+                and PROPOSAL_CLAIM_PATTERN.search(_message_text(last.content))
+            ):
+                return "nudge"
             return "stop"
 
         async def nudge_node(state: AgentState) -> dict[str, Any]:
             draft = state["messages"][-1]
             draft_text = _message_text(getattr(draft, "content", "")).strip()
-            reason = "stale" if draft_text else "empty"
+            if PROPOSAL_CLAIM_PATTERN.search(draft_text) and not state.get("proposals"):
+                reason = "proposal"
+            elif draft_text:
+                reason = "stale"
+            else:
+                reason = "empty"
             logger.info("nudging the model (%s)", reason)
             # Drop the draft so the replacement answer is not a continuation of it —
             # otherwise the model restates the stale content and the user sees both.
             messages: list[AnyMessage] = []
             if isinstance(draft, AIMessage) and getattr(draft, "id", None):
                 messages.append(RemoveMessage(id=draft.id))
-            messages.append(
-                HumanMessage(
-                    content=FRESHNESS_NUDGE if reason == "stale" else EMPTY_ANSWER_NUDGE
-                )
-            )
+            nudge = {
+                "proposal": PROPOSAL_NUDGE,
+                "stale": FRESHNESS_NUDGE,
+                "empty": EMPTY_ANSWER_NUDGE,
+            }[reason]
+            messages.append(HumanMessage(content=nudge))
             return {
                 "messages": messages,
                 "nudges": state.get("nudges", 0) + 1,
@@ -493,36 +649,15 @@ class WorkspaceAgent:
         graph.add_edge("nudge", "agent")
         return graph.compile()
 
-    async def _propose(self, name: str, args: dict[str, Any]) -> tuple[dict, Operation]:
-        """Record a pending write and derive its diff from a fresh read."""
-        enriched = self._enrich_arguments(name, args)
-        diff = await self._read_before_values(name, enriched)
-        try:
-            operation = create_operation(
-                self.session, self.workspace.id, name, enriched, diff=diff
-            )
-        except OperationError as exc:
-            # A write call without a resolvable target cannot become a proposal, and
-            # fabricating one would be worse than telling the model to try again.
-            raise ToolProposalError(str(exc)) from exc
-        self.session.flush()
-        return (
-            {
-                "operation_id": operation.id,
-                "tool": name,
-                "summary": operation.summary,
-                "path": operation.rel_path,
-                "diff": diff,
-            },
-            operation,
-        )
-
     def _enrich_arguments(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Attach the current file digest to write arguments.
 
-        The digest is read here rather than asked of the model: it is bookkeeping the
-        model has no way to know, and the whole point of the field is to detect a
-        concurrent edit between proposal and approval.
+        The digest is read here rather than asked of the model: it is bookkeeping
+        the model has no way to know, and the whole point of the field is to
+        detect a concurrent edit between proposal and approval. The model's own
+        value — if it emits one — is always overwritten: models regenerate long
+        hex strings token by token and hallucinate them, and a fabricated digest
+        would poison the proposal into an unapplyable state.
         """
         enriched = dict(args)
         path = args.get("path") or args.get("filepath")
@@ -531,7 +666,7 @@ class WorkspaceAgent:
 
         digest = self._file_digest(path)
         if digest:
-            enriched.setdefault("expected_digest", digest)
+            enriched["expected_digest"] = digest
         return enriched
 
     def _file_digest(self, rel_path: str) -> str | None:
@@ -621,6 +756,8 @@ class WorkspaceAgent:
             "proposals": [],
             "tool_calls_made": 0,
             "nudges": 0,
+            "last_failure": None,
+            "failure_repeats": 0,
         }
 
         final_text = ""

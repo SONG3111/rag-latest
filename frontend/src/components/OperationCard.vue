@@ -14,6 +14,8 @@ const props = defineProps<{ operation: Operation; compact?: boolean }>()
 const store = useWorkspaceStore()
 
 const isPending = computed(() => props.operation.status === 'proposed')
+const isFailed = computed(() => props.operation.status === 'failed')
+const isRetryable = computed(() => isPending.value || isFailed.value)
 const isApplied = computed(() => props.operation.status === 'applied')
 
 function render(value: unknown): string {
@@ -81,10 +83,10 @@ async function revert() {
       已备份原文件，可一键还原
     </div>
 
-    <div v-if="isPending" class="operation-actions">
+    <div v-if="isRetryable" class="operation-actions">
       <a-button type="primary" size="small" @click="apply">
         <template #icon><CheckOutlined /></template>
-        应用修改
+        {{ isFailed ? '重试' : '应用修改' }}
       </a-button>
       <a-button size="small" @click="reject">
         <template #icon><CloseOutlined /></template>

@@ -127,6 +127,110 @@ def test_operations_gate_writes(workspace_with_file, temp_session) -> None:
     asyncio.run(scenario())
 
 
+def test_applying_one_proposal_unlocks_follow_ups_on_the_same_file(
+    workspace_with_file, temp_session
+) -> None:
+    """同文件多条提案按序确认：第一条应用后，后续提案的乐观锁要刷新到新 digest。
+
+    回归：一轮对话产生多条写提案时它们共享提案时刻的 digest，用户确认第一条后，
+    第二条起全部 409 write_conflict，多操作请求永远只能落地第一条。
+    """
+    workspace, target = workspace_with_file
+
+    async def scenario() -> None:
+        from mcp_office_server.excel_ops import file_digest
+
+        client = await _client()
+        try:
+            digest = file_digest(target)
+            first = create_operation(
+                temp_session,
+                workspace.id,
+                "update_cells",
+                {
+                    "path": "销售表.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "B2", "value": 1500}],
+                    "expected_digest": digest,
+                },
+            )
+            second = create_operation(
+                temp_session,
+                workspace.id,
+                "update_cells",
+                {
+                    "path": "销售表.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "A2", "value": "A型Pro"}],
+                    "expected_digest": digest,
+                },
+            )
+            temp_session.flush()
+
+            await apply_operation(temp_session, first, client)
+            assert first.status is OperationStatus.applied
+
+            # 第一条应用后，第二条的锁必须已指向新 digest，而不是提案时刻的旧值。
+            assert second.arguments["expected_digest"] == first.result["digest"]
+            assert second.arguments["expected_digest"] != digest
+
+            await apply_operation(temp_session, second, client)
+            assert second.status is OperationStatus.applied
+            assert load_workbook(target)["销售"]["A2"].value == "A型Pro"
+            assert load_workbook(target)["销售"]["B2"].value == 1500
+        finally:
+            await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_failed_operation_can_be_retried(workspace_with_file, temp_session) -> None:
+    """A failed apply stays retryable instead of dead-ending as 'already failed'.
+
+    The usual failure causes are transient (file locked by Excel, a conflict the
+    user has since resolved), so the retry path must keep working — the digest
+    check still guards each attempt against a changed file.
+    """
+    workspace, target = workspace_with_file
+
+    async def scenario() -> None:
+        from mcp_office_server.excel_ops import file_digest
+
+        client = await _client()
+        try:
+            proposal = create_operation(
+                temp_session,
+                workspace.id,
+                "update_cells",
+                {
+                    "path": "销售表.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "B2", "value": 1500}],
+                    "expected_digest": "0" * 64,  # guaranteed conflict
+                },
+            )
+            temp_session.flush()
+
+            with pytest.raises(OperationError):
+                await apply_operation(temp_session, proposal, client)
+            assert proposal.status is OperationStatus.failed
+            assert proposal.error is not None
+
+            # The blocking condition is gone (digest corrected) → retry applies.
+            proposal.arguments = {
+                **proposal.arguments,
+                "expected_digest": file_digest(target),
+            }
+            await apply_operation(temp_session, proposal, client)
+            assert proposal.status is OperationStatus.applied
+            assert proposal.error is None
+            assert load_workbook(target)["销售"]["B2"].value == 1500
+        finally:
+            await client.stop()
+
+    asyncio.run(scenario())
+
+
 def test_rejecting_leaves_file_byte_identical(workspace_with_file, temp_session) -> None:
     workspace, target = workspace_with_file
     original = target.read_bytes()

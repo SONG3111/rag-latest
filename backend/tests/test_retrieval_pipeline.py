@@ -420,3 +420,77 @@ def test_rewriter_disabled_makes_no_model_call() -> None:
         settings.query_rewrite_enabled = original
     assert result.query == "报销咋整"
     assert llm.calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# write-lock discipline
+# --------------------------------------------------------------------------- #
+def test_index_file_embeds_before_any_db_write(temp_session, tmp_path, monkeypatch) -> None:
+    """Reindexing must not hold SQLite's write lock while the model embeds.
+
+    It used to flush an ``indexing`` status row first and embed inside that
+    transaction, so a concurrent approval click queued behind the whole
+    embedding run and died with ``database is locked``. Embedding must happen
+    before the first write of the indexing burst.
+    """
+    import io as _io
+
+    from sqlalchemy import event
+
+    from app.config import get_settings
+    from app.services.files import index_file, save_upload
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
+    settings.ensure_directories()
+
+    workspace = Workspace(name="锁窗口测试")
+    temp_session.add(workspace)
+    temp_session.flush()
+
+    book = Workbook()
+    book.active.append(["产品", "单价"])
+    book.active.append(["甲", 10])
+    buffer = _io.BytesIO()
+    book.save(buffer)
+    record = save_upload(temp_session, workspace, "小表.xlsx", buffer.getvalue())
+    temp_session.flush()
+
+    state = {"writes_started": False}
+
+    def _mark_before_flush(*_args, **_kwargs) -> None:
+        state["writes_started"] = True
+
+    event.listen(temp_session, "before_flush", _mark_before_flush)
+
+    class SpyEmbeddings:
+        def embed_documents(self, texts):
+            assert not state["writes_started"], (
+                "embedding ran after the write burst began; the SQLite write "
+                "lock would be held across the model call"
+            )
+            return [[float(len(text)) % 7] * 4 for text in texts]
+
+        def embed_query(self, text):
+            return [0.0] * 4
+
+    upserts: list[int] = []
+
+    class RecordingStore:
+        def upsert_vectors(self, workspace_id, chunk_ids, vectors, payloads):
+            upserts.append(len(chunk_ids))
+            assert len(vectors) == len(chunk_ids)
+            return len(chunk_ids)
+
+    result = index_file(
+        temp_session,
+        workspace.id,
+        record,
+        embeddings=SpyEmbeddings(),
+        vector_store=RecordingStore(),
+    )
+
+    assert result.chunk_count > 0
+    assert result.vector_count == result.chunk_count
+    assert upserts == [result.chunk_count]
+    assert state["writes_started"]

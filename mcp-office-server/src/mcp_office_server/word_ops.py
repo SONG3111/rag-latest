@@ -20,6 +20,7 @@ from docx.oxml.text.paragraph import CT_P
 from docx.text.paragraph import Paragraph
 
 from .errors import (
+    FileLocked,
     CorruptDocument,
     ParagraphNotFound,
     RangeError,
@@ -230,6 +231,19 @@ def _replace_in_paragraph(paragraph: Paragraph, find: str, replace: str, count: 
     return replaced_count
 
 
+def save_document(document, path: Path) -> None:
+    """Persist the document, translating OS-level write failures into ToolError."""
+    try:
+        document.save(str(path))
+    except PermissionError as exc:
+        raise FileLocked(
+            "文件正被其他程序占用（如 Word/WPS），请关闭后重试",
+            detail=str(exc),
+        ) from exc
+    except OSError as exc:
+        raise ToolError(f"写入文件失败: {exc}", detail=str(exc)) from exc
+
+
 def replace_text(
     path: Path,
     find: str,
@@ -287,7 +301,7 @@ def replace_text(
                             )
 
     if total:
-        document.save(str(path))
+        save_document(document, path)
 
     return {
         "kind": "word",
@@ -335,7 +349,7 @@ def update_table_cell(
     else:  # pragma: no cover - python-docx always creates one paragraph
         cell.add_paragraph(value)
 
-    document.save(str(path))
+    save_document(document, path)
     return {
         "kind": "word",
         "changes": [

@@ -17,7 +17,7 @@ from ..config import Settings, get_settings
 from ..models import Chunk, DocumentFile, IndexStatus, Workspace
 from ..retrieval.bm25 import token_counts
 from ..retrieval.chunking import chunk_document_groups
-from ..retrieval.vector_store import VectorStore
+from ..retrieval.vector_store import VectorStore, VectorStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,12 @@ def index_file(
     written. The dense index is best-effort: when the embedding provider is
     unreachable the file still becomes searchable through BM25 rather than ending up
     entirely unindexed.
+
+    SQLite allows exactly one writer, so parsing and embedding deliberately happen
+    BEFORE the first write of this function: the write lock is then held only for
+    the row swap (milliseconds), never for the seconds a local embedding model
+    needs. Holding it across embedding starved every concurrent approval click
+    until its transaction timed out with ``database is locked``.
     """
     settings = settings or get_settings()
     path = resolve_workspace_path(workspace_id, record.rel_path)
@@ -169,13 +175,12 @@ def index_file(
             record.id, record.rel_path, 0, 0, IndexStatus.failed, record.error
         )
 
-    record.status = IndexStatus.indexing
-    record.error = None
-    session.flush()
-
     try:
         groups = chunk_document_groups(
-            path, record.rel_path, chunk_size=settings.chunk_size
+            path,
+            record.rel_path,
+            chunk_size_tokens=settings.chunk_size_tokens,
+            chunk_overlap_tokens=settings.chunk_overlap_tokens,
         )
     except Exception as exc:
         record.status = IndexStatus.failed
@@ -186,77 +191,53 @@ def index_file(
             record.id, record.rel_path, 0, 0, IndexStatus.failed, record.error
         )
 
-    # Re-indexing replaces rather than appends, so a file never contributes twice.
-    session.execute(delete(Chunk).where(Chunk.file_id == record.id))
-    session.flush()
-
-    chunk_rows: list[Chunk] = []
+    # ---- preparation: build rows and embed BEFORE any DB write, so the SQLite
+    # write lock is held only for the row swap, never for the model's runtime ----
+    pending_parents: list[tuple[Chunk, list[Chunk]]] = []
     child_rows: list[Chunk] = []
-    ordinal = 0
     for group in groups:
-        parent_text = group.parent.text
-        counts = token_counts(parent_text)
+        parent_counts = token_counts(group.parent.text)
         parent_row = Chunk(
-            workspace_id=workspace_id,
-            file_id=record.id,
-            parent_id=None,
             level="parent",
-            ordinal=ordinal,
-            text=parent_text,
+            ordinal=0,
+            text=group.parent.text,
             location=group.parent.location,
             meta=group.parent.meta,
-            token_counts=counts,
-            token_length=sum(counts.values()),
+            token_counts=parent_counts,
+            token_length=sum(parent_counts.values()),
         )
-        session.add(parent_row)
-        session.flush()  # the id is needed before the children reference it
-        ordinal += 1
-
+        children: list[Chunk] = []
         for child in group.children:
             child_counts = token_counts(child.text)
             child_row = Chunk(
-                workspace_id=workspace_id,
-                file_id=record.id,
-                parent_id=parent_row.id,
                 level="child",
-                ordinal=ordinal,
+                ordinal=0,
                 text=child.text,
                 location=child.location,
                 meta=child.meta,
                 token_counts=child_counts,
                 token_length=sum(child_counts.values()),
             )
-            session.add(child_row)
-            ordinal += 1
+            children.append(child_row)
             child_rows.append(child_row)
-            chunk_rows.append(child_row)
-    session.flush()
+        pending_parents.append((parent_row, children))
 
-    vector_count = 0
+    vectors: list | None = None
     vector_error: str | None = None
-    if chunk_rows:
+    if child_rows:
         try:
-            store = vector_store or VectorStore(settings)
             if embeddings is None:
                 from ..llm.providers import build_embeddings
 
                 embeddings = build_embeddings(settings)
-            vector_count = store.upsert(
-                workspace_id,
-                embeddings,
-                [row.id for row in chunk_rows],
-                [row.text for row in chunk_rows],
-                [
-                    {
-                        "file_id": record.id,
-                        "rel_path": record.rel_path,
-                        "location": row.location,
-                        "ordinal": row.ordinal,
-                    }
-                    for row in chunk_rows
-                ],
-            )
+            vectors = embeddings.embed_documents([row.text for row in child_rows])
+            if len(vectors) != len(child_rows):
+                raise VectorStoreError(
+                    f"embedding provider returned {len(vectors)} vectors "
+                    f"for {len(child_rows)} chunks"
+                )
         except Exception as exc:
+            vectors = None
             vector_error = str(exc)
             logger.warning(
                 "dense indexing failed for %s, keyword search still available: %s",
@@ -264,7 +245,61 @@ def index_file(
                 exc,
             )
 
-    record.chunk_count = len(chunk_rows)
+    # ---- write burst: row swap and final status only, no model calls inside ----
+    record.status = IndexStatus.indexing
+    record.error = None
+    session.flush()
+
+    # Re-indexing replaces rather than appends, so a file never contributes twice.
+    session.execute(delete(Chunk).where(Chunk.file_id == record.id))
+    session.flush()
+
+    ordinal = 0
+    for parent_row, _ in pending_parents:
+        parent_row.workspace_id = workspace_id
+        parent_row.file_id = record.id
+        parent_row.ordinal = ordinal
+        ordinal += 1
+        session.add(parent_row)
+    session.flush()  # ids exist before children reference them
+
+    for parent_row, children in pending_parents:
+        for child_row in children:
+            child_row.workspace_id = workspace_id
+            child_row.file_id = record.id
+            child_row.parent_id = parent_row.id
+            child_row.ordinal = ordinal
+            ordinal += 1
+            session.add(child_row)
+    session.flush()
+
+    vector_count = 0
+    if vectors is not None:
+        try:
+            store = vector_store or VectorStore(settings)
+            vector_count = store.upsert_vectors(
+                workspace_id,
+                [row.id for row in child_rows],
+                vectors,
+                [
+                    {
+                        "file_id": record.id,
+                        "rel_path": record.rel_path,
+                        "location": row.location,
+                        "ordinal": row.ordinal,
+                    }
+                    for row in child_rows
+                ],
+            )
+        except Exception as exc:
+            vector_error = vector_error or str(exc)
+            logger.warning(
+                "dense index write failed for %s, keyword search still available: %s",
+                record.rel_path,
+                exc,
+            )
+
+    record.chunk_count = len(child_rows)
     record.checksum = _digest(path)
     record.indexed_at = datetime.now(timezone.utc)
     record.status = IndexStatus.indexed
@@ -273,12 +308,12 @@ def index_file(
     session.flush()
 
     logger.info(
-        "indexed %s: %d chunks, %d vectors", record.rel_path, len(chunk_rows), vector_count
+        "indexed %s: %d chunks, %d vectors", record.rel_path, len(child_rows), vector_count
     )
     return IndexingResult(
         file_id=record.id,
         rel_path=record.rel_path,
-        chunk_count=len(chunk_rows),
+        chunk_count=len(child_rows),
         vector_count=vector_count,
         status=record.status,
         error=record.error,

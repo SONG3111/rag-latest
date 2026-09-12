@@ -7,13 +7,13 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent.graph import AgentEvent, WorkspaceAgent
-from ..db import get_session
+from ..db import get_session, session_scope
 from ..models import (
     DocumentFile,
     Message,
@@ -543,6 +543,7 @@ async def apply(
     workspace_id: str,
     operation_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ) -> Operation:
     _get_workspace(session, workspace_id)
@@ -551,10 +552,15 @@ async def apply(
     try:
         await apply_operation(session, operation, client)
     except OperationError as exc:
+        # Persist the failed state before the dependency's rollback wipes it,
+        # so the operation history shows what actually happened.
+        session.commit()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    # The file changed on disk, so its chunks are now stale.
-    _reindex_after_write(session, workspace_id, operation.rel_path)
     session.commit()
+    # The file changed on disk, so its chunks are now stale. Re-embedding runs
+    # in the background: it costs seconds of CPU on the local model, and making
+    # the confirmation click wait for it delayed the "已应用" feedback badly.
+    background_tasks.add_task(_reindex_after_write_task, workspace_id, operation.rel_path)
     return operation
 
 
@@ -579,7 +585,10 @@ def reject(
     response_model=OperationRead,
 )
 def revert(
-    workspace_id: str, operation_id: str, session: Session = Depends(get_session)
+    workspace_id: str,
+    operation_id: str,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
 ) -> Operation:
     _get_workspace(session, workspace_id)
     operation = _load_operation(session, workspace_id, operation_id)
@@ -587,8 +596,14 @@ def revert(
         revert_operation(session, operation)
     except OperationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _reindex_after_write(session, workspace_id, operation.rel_path)
+    background_tasks.add_task(_reindex_after_write_task, workspace_id, operation.rel_path)
     return operation
+
+
+def _reindex_after_write_task(workspace_id: str, rel_path: str) -> None:
+    """Reindex in the request's background, on a session of its own."""
+    with session_scope() as session:
+        _reindex_after_write(session, workspace_id, rel_path)
 
 
 def _load_operation(session: Session, workspace_id: str, operation_id: str) -> Operation:

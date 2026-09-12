@@ -6,8 +6,14 @@ import OperationCard from './OperationCard.vue'
 
 const store = useWorkspaceStore()
 
-const pending = computed(() => store.operations.filter((item) => item.status === 'proposed'))
-const history = computed(() => store.operations.filter((item) => item.status !== 'proposed'))
+// 失败的提案也留在待确认面板：失败多为瞬时原因（文件被占用、校验冲突），
+// 排除后用户可以直接点「重试」。
+const pending = computed(() =>
+  store.operations.filter((item) => item.status === 'proposed' || item.status === 'failed'),
+)
+const history = computed(() =>
+  store.operations.filter((item) => item.status !== 'proposed' && item.status !== 'failed'),
+)
 
 const statusLabels: Record<string, string> = {
   proposed: '待确认',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { SendOutlined, ToolOutlined } from '@ant-design/icons-vue'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -9,6 +9,59 @@ import OperationCard from './OperationCard.vue'
 const store = useWorkspaceStore()
 const draft = ref('')
 const scroller = ref<HTMLElement | null>(null)
+const textareaRef = ref<{ resizableTextArea?: { textArea?: HTMLTextAreaElement } } | null>(null)
+
+// IME 组合输入守卫。ant-design-vue 的 TextArea 在组合结束时会读取 textarea 的实时
+// DOM 值并强制 emit update:value（TextArea.js 的 onInternalCompositionEnd）——发送
+// 清空 draft 之后，仍在收尾的输入法组合就会把刚发送的原文重新写回输入框。Vue 原生
+// v-model 通过忽略拼字阶段的更新来规避这个问题（官方文档"表单输入绑定"），这里在
+// 组件层补齐同样的语义：拼字期间 draft 不跟随，组合结束时一次性同步。
+const composing = ref(false)
+const composingText = ref('')
+let clearDuringComposition = false
+let sentWhileComposing: string | null = null
+
+const composerText = computed(() => (composing.value ? composingText.value : draft.value))
+
+function textareaEl(): HTMLTextAreaElement | null {
+  return textareaRef.value?.resizableTextArea?.textArea ?? null
+}
+
+function onDraftInput(value: string) {
+  if (composing.value) {
+    composingText.value = value
+    return
+  }
+  draft.value = value
+}
+
+function onCompositionStart() {
+  composing.value = true
+  composingText.value = ''
+}
+
+function onCompositionEnd() {
+  if (!composing.value) return
+  composing.value = false
+  const el = textareaEl()
+  if (clearDuringComposition && el && el.value === sentWhileComposing) {
+    // 发生在拼字中的发送：输入法把刚发送的原文写回了缓冲，直接清掉
+    el.value = ''
+  }
+  clearDuringComposition = false
+  sentWhileComposing = null
+  draft.value = el ? el.value : ''
+  composingText.value = ''
+}
+
+function onPressEnter(event: KeyboardEvent) {
+  // 拼字阶段的 Enter 属于输入法（选词/上屏），不触发发送
+  if (composing.value || event.isComposing || event.keyCode === 229) return
+  if (!event.shiftKey) {
+    event.preventDefault()
+    send()
+  }
+}
 
 const examples = [
   '制度里规定的单笔报销上限是多少？',
@@ -29,13 +82,19 @@ watch(
 )
 
 async function send(text?: string) {
-  const content = (text ?? draft.value).trim()
+  const content = (text ?? composerText.value).trim()
   if (!content || store.streaming) return
   if (!store.activeWorkspaceId) {
     message.warning('请先选择或新建一个工作区')
     return
   }
+  if (composing.value) {
+    // 拼字中途发送：组合收尾时不再把缓冲里的已发送原文同步回来
+    clearDuringComposition = true
+    sentWhileComposing = content
+  }
   draft.value = ''
+  composingText.value = ''
   await store.send(content)
   await scrollToBottom()
 }
@@ -107,22 +166,19 @@ async function send(text?: string) {
 
     <div class="composer">
       <a-textarea
-        v-model:value="draft"
+        ref="textareaRef"
+        :value="draft"
         :auto-size="{ minRows: 1, maxRows: 5 }"
         placeholder="描述你想查询或修改的内容，Enter 发送，Shift+Enter 换行"
         :disabled="store.streaming"
-        @press-enter="
-          (event: KeyboardEvent) => {
-            if (!event.shiftKey) {
-              event.preventDefault()
-              send()
-            }
-          }
-        "
+        @update:value="onDraftInput"
+        @compositionstart="onCompositionStart"
+        @compositionend="onCompositionEnd"
+        @press-enter="onPressEnter"
       />
       <a-button
         type="primary"
-        :disabled="!draft.trim() || store.streaming || !store.activeWorkspaceId"
+        :disabled="!composerText.trim() || store.streaming || !store.activeWorkspaceId"
         @click="send()"
       >
         <template #icon><SendOutlined /></template>

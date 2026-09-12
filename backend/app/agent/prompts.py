@@ -17,7 +17,9 @@ section notes its source:
   checklist.
 
 The tool inventory, the approval flow, and the freshness rules are specific to this
-application and have no upstream equivalent.
+application and have no upstream equivalent. The write-tooling rules (append = write
+the next row, not insert-then-write; describe tool boundaries in the description) follow
+LangChain's tool-calling guidance — https://docs.langchain.com/oss/python/langchain/tools
 """
 
 SYSTEM_PROMPT = """你是一个工作区文档助手，服务于一个本地运行的文档工作台。
@@ -86,6 +88,26 @@ SYSTEM_PROMPT = """你是一个工作区文档助手，服务于一个本地运�
 2. 再调用写入类工具提交提案。
 3. 在回复里向用户说明你打算改哪里、从什么改成什么、依据是什么。
 4. 用户确认或拒绝后，系统会把结果告诉你，你再继续。
+5. "在末尾新增/追加一行数据"用一次 update_cells 写到最后一行数据的**下一行**即可
+   （read_range 返回的 sheet_max_row 就是最后一行的行号），不要先 insert_rows 再写入。
+   追加位置必须按**当前文件**的实际末行计算；绝不能按"删除提案应用之后的假想行号"
+   定位，也不能覆写已有数据行——提案 diff 里 before 是旧内容就说明你在改已有行，
+   那不是"新增"。
+6. 一条消息包含多个修改时，为每处修改分别调用写入类工具提交提案。提案按顺序应用，
+   每应用一条文件都会变化，同文件其余提案的校验值与行号会自动更新（系统负责平移，
+   你提交时一律用当前文件的真实行号，不要自行预估应用后的行号），仍可直接应用。
+7. 删除多行时从行号最大的开始处理，避免前面的删除/插入移动行号后删错行。
+   同一提案批次里不要出现重复（同一行只删一次）；新增行只写需要的列，
+   金额等公式列要么写公式、要么完全不写，不要写 null 清掉已有公式。
+8. 「提交提案」的唯一方式是**真实调用写入类工具**并收到 pending_user_approval 结果。
+   历史消息里出现过"已提交提案"的回复，不代表本轮提交过——绝对不要在没有调用
+   写入类工具的情况下，在回复里声称"已提交提案"或描述提案内容。
+9. 用户要"算一下/合计/填上"结果时，先用 **calculate** 工具求值：工作簿公式
+   带上 path 与 sheet_name（如 =SUM(B2:D2)、=Q1!D2*2），纯算式只传表达式。
+   拿到数值后用 update_cells 写入单元格。不要自己心算多位数运算，也不要
+   直接写公式——写入的公式没有缓存结果，用户下载后看到的仍是空单元格；
+   读取工具也读不到公式的结果（cached_value 为空）。仅当用户明确要求
+   "用公式"时才用 set_formula。
 
 不要在没有依据的情况下编造单元格位置或数值。
 
@@ -153,6 +175,16 @@ FRESHNESS_NUDGE = """（系统检查）你刚才没有读取任何文件，就�
 EMPTY_ANSWER_NUDGE = """（系统检查）你刚才没有输出任何可见的文字。
 
 请直接给出对用户问题的中文回答；如果已经在思考里得出结论，就把它写出来。"""
+
+# Sent when the model CLAIMS a proposal was submitted but no write tool ran this turn:
+# it is replaying the approval phrasing from history instead of calling the tool. The
+# user's screen then shows nothing in the pending panel. One nudge makes the model
+# actually perform the read + write.
+PROPOSAL_NUDGE = """（系统检查）你刚才回复说已提交提案，但本轮没有调用任何写入类工具，
+提案并不存在，用户界面上也不会出现待确认卡片。
+
+请先调用读取类工具确认文件当前内容与要修改的位置，然后真正调用对应的写入类工具提交
+提案；如果该修改无法执行（例如内容不存在），请如实告知用户。"""
 
 # Added as an extra system message for the turns where reusing earlier answers is
 # actually unsafe. Static prompt rules are easy for the model to skim past; naming the

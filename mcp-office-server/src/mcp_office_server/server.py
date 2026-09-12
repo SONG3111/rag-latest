@@ -23,8 +23,8 @@ from typing import Any, Iterable
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from . import excel_ops, sandbox, word_ops
-from .errors import ToolError, error_payload
+from . import calculator, excel_ops, sandbox, word_ops
+from .errors import SheetNotFound, ToolError, error_payload
 
 # stdio transport reserves stdout for protocol frames, so logs must go to stderr.
 logging.basicConfig(
@@ -114,6 +114,9 @@ def read_range(
             可用返回的 end_cell 继续往后读）。读取整张表时不要传这个参数。
 
     公式单元格会以 {"formula": ..., "cached_value": ...} 形式返回。
+    注意：本系统写入的公式没有缓存结果（openpyxl 的限制），cached_value 通常是
+    null——读不到公式的计算结果（跨表引用如 =Q1!D2 同样如此）。需要公式的
+    结果时请用 calculate 工具现算（传 path 与 sheet_name）。
     返回结果里的 digest 是文件当前内容指纹，后续修改时应原样回传。
     """
     try:
@@ -185,6 +188,47 @@ def find_text(path: str, query: str) -> str:
         return _handle(exc)
 
 
+@mcp.tool(annotations=READ_ONLY)
+def calculate(
+    expression: str,
+    path: str | None = None,
+    sheet_name: str | None = None,
+) -> str:
+    """计算算式或 Excel 公式的结果。**只读，不修改文件。**
+
+    两种用法：
+    - 纯算式：只传 expression，例如 "1200*98 + 128250"。
+    - 工作簿公式：同时传 path（sheet_name 可选，默认第一个工作表），
+      expression 写 Excel 公式，例如 "=SUM(B2:D2)"、"=Q1!D2*2"。
+      会按工作簿的真实单元格重算，支持区域、跨表引用和公式套公式。
+
+    读取工具读不到公式的计算结果（cached_value 为空），需要数值时请用本工具
+    计算，再用 update_cells 把数字写入表格。不要自己心算多位数运算。
+    """
+    try:
+        if path:
+            resolved = sandbox.resolve_document(path)
+            structure = excel_ops.workbook_structure(resolved)
+            sheets = [s["name"] for s in structure.get("sheets", [])]
+            sheet = sheet_name or (sheets[0] if sheets else None)
+            if not sheet:
+                raise SheetNotFound("workbook has no sheets")
+            if sheet not in sheets:
+                raise SheetNotFound(f"workbook has no sheet named {sheet!r}")
+            value = calculator.evaluate_workbook_formula(resolved, sheet, expression)
+            return _ok(
+                {
+                    "expression": expression,
+                    "sheet": sheet,
+                    "value": excel_ops._jsonify(value),
+                }
+            )
+        value = calculator.safe_arithmetic(expression)
+        return _ok({"expression": expression, "value": excel_ops._jsonify(value)})
+    except ToolError as exc:
+        return _handle(exc)
+
+
 # --------------------------------------------------------------------------- #
 # write tools
 # --------------------------------------------------------------------------- #
@@ -227,6 +271,11 @@ def set_formula(
     """向 Excel 单元格写入公式。**会写入用户的文件。**
 
     formula 可带或不带开头的 "="，例如 "SUM(B2:B10)"。
+
+    写入的公式不携带计算结果（openpyxl 限制）：不做重算的查看器里该单元格会
+    显示为空，Excel/WPS 打开时才会重算出值。用户要求"算出来/填上/合计多少"
+    这类要看到数字的场景，请先用 calculate 工具算出数值，再用 update_cells
+    写入；仅当用户明确要"用公式"时才使用本工具。
     """
     try:
         resolved = sandbox.resolve_document(path)
@@ -251,9 +300,11 @@ def insert_rows(
     count: int = 1,
     expected_digest: str | None = None,
 ) -> str:
-    """在 Excel 指定行位置插入空行。**会写入用户的文件。**
+    """在 Excel 指定行位置**之前**插入空行，原有行整体下移。**会写入用户的文件。**
 
     start_row 从 1 开始计数，count 为插入行数。
+    向表格**末尾追加数据**不需要本工具：直接用 update_cells 写入最后一行数据的
+    下一行即可，先插空行再写会把已有行挤到错误的位置。
     """
     try:
         resolved = sandbox.resolve_document(path)

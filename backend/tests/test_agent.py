@@ -261,7 +261,8 @@ def test_unknown_tool_reports_an_error_without_crashing(agent_env, temp_session)
     events = asyncio.run(scenario())
     results = [event for event in events if event.type == "tool_result"]
     assert results
-    assert "unknown_tool" in results[0].data["content"]
+    # LangGraph ToolNode 的无效工具名文案（框架格式，附带可用工具列表）。
+    assert "is not a valid tool" in results[0].data["content"]
 
 
 def test_iteration_ceiling_stops_a_looping_model(agent_env, temp_session, monkeypatch) -> None:
@@ -443,6 +444,232 @@ def test_empty_answer_is_retried_only_once(agent_env, temp_session) -> None:
     # The route layer turns an empty turn into an explicit message for the user.
     done = next(event for event in events if event.type == "done")
     assert done.data["content"] == ""
+
+
+def test_model_supplied_digest_is_overwritten_by_the_backend(
+    agent_env, temp_session
+) -> None:
+    """The backend owns expected_digest; a hallucinated model value must lose.
+
+    Regression: the model copied a wrong digest into later write calls, and the
+    setdefault kept it — poisoning the proposal into an unapplyable state.
+    """
+    workspace, _ = agent_env
+    fake_digest = "c" * 64  # the model inventing a hash
+    scripted = ScriptedLLM(
+        [
+            _call(
+                "update_cells",
+                {
+                    "path": "销售表.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "B2", "value": 1}],
+                    "expected_digest": fake_digest,
+                },
+            ),
+            AIMessage(content="ok"),
+        ]
+    )
+
+    async def scenario():
+        from app.config import get_settings
+
+        client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
+        await client.start()
+        try:
+            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            await _run(agent)
+        finally:
+            await client.stop()
+
+    asyncio.run(scenario())
+    from sqlalchemy import select
+
+    from app.models import Operation
+
+    operation = temp_session.scalar(select(Operation))
+    assert operation is not None
+    stored = operation.arguments["expected_digest"]
+    assert stored != fake_digest
+    assert len(stored) == 64
+
+
+def test_unstructured_tool_error_is_a_failure_not_a_success() -> None:
+    """FastMCP wraps tool exceptions as plain text; that must read as a failure.
+
+    Regression: 'Error executing tool insert_rows: [Errno 13] Permission denied'
+    landed in the raw fallback as ok:True, so apply_operation marked a write that
+    never happened as applied.
+    """
+    raw = [
+        {
+            "type": "text",
+            "text": "Error executing tool insert_rows: [Errno 13] Permission denied",
+        }
+    ]
+    payload = parse_tool_result(raw)
+    assert payload["ok"] is False
+    assert "Permission denied" in payload["error"]["message"]
+
+
+def test_fabricated_proposal_claim_is_sent_back_to_actually_call_the_tool(
+    agent_env, temp_session
+) -> None:
+    """A reply that claims a proposal without any write tool call is a fabrication.
+
+    Regression: with the approval phrasing already in history, the model answered
+    "已提交删除提案：…" without calling delete_rows — no operation was created and
+    the user's pending panel stayed empty. The agent must nudge once so the model
+    actually performs the read + write.
+    """
+    workspace, _ = agent_env
+    scripted = ScriptedLLM(
+        [
+            AIMessage(content="已提交删除提案：\n- **文件**：销售表.xlsx\n- **删除第 3 行**：B型"),
+            _call(
+                "delete_rows",
+                {"path": "销售表.xlsx", "sheet_name": "销售", "start_row": 3},
+            ),
+            AIMessage(content="已提交删除提案，请在界面确认后执行。"),
+        ]
+    )
+
+    async def scenario():
+        from app.config import get_settings
+
+        client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
+        await client.start()
+        try:
+            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            return await _run(agent)
+        finally:
+            await client.stop()
+
+    events = asyncio.run(scenario())
+
+    # One nudge happened, and the model then really called the write tool.
+    assert len(scripted.calls) == 3
+    nudge = scripted.calls[1][-1]
+    assert "提案并不存在" in nudge.content
+    proposals = [event for event in events if event.type == "proposal"]
+    assert len(proposals) == 1
+    assert proposals[0].data["tool"] == "delete_rows"
+
+    # The fabricated draft must not survive into the replacement turn.
+    assert not any(
+        isinstance(m, AIMessage) and "已提交删除提案" in str(m.content)
+        for m in scripted.calls[2]
+    )
+
+
+def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env, temp_session) -> None:
+    """A write call naming a file the workspace does not have must not be recorded.
+
+    Regression: the model once shortened 01-产品订单表.xlsx to 订单.xlsx; the
+    proposal was recorded, applied later, and only then failed with 'the target
+    file no longer exists'. The rejection now surfaces immediately so the model
+    retries with the exact path from its earlier reads.
+    """
+    workspace, _ = agent_env
+    scripted = ScriptedLLM(
+        [
+            _call(
+                "update_cells",
+                {
+                    "path": "订单.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "B2", "value": 1}],
+                },
+            ),
+            _call(
+                "update_cells",
+                {
+                    "path": "销售表.xlsx",
+                    "sheet_name": "销售",
+                    "updates": [{"cell": "B2", "value": 1}],
+                },
+            ),
+            AIMessage(content="已提交提案，请在界面确认。"),
+        ]
+    )
+
+    async def scenario():
+        from app.config import get_settings
+
+        client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
+        await client.start()
+        try:
+            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            return await _run(agent)
+        finally:
+            await client.stop()
+
+    events = asyncio.run(scenario())
+    results = [event for event in events if event.type == "tool_result"]
+    assert "不存在" in results[0].data["content"]
+    proposals = [event for event in events if event.type == "proposal"]
+    assert len(proposals) == 1
+    assert proposals[0].data["path"] == "销售表.xlsx"
+
+
+def test_failed_read_carries_a_chinese_correction_hint(agent_env, temp_session) -> None:
+    """Failed tool results are enriched with an actionable Chinese hint."""
+    workspace, _ = agent_env
+    scripted = ScriptedLLM(
+        [
+            _call("read_range", {"path": "不存在的表.xlsx", "sheet_name": "销售"}),
+            AIMessage(content="工作区里没有这个文件。"),
+        ]
+    )
+
+    async def scenario():
+        from app.config import get_settings
+
+        client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
+        await client.start()
+        try:
+            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            return await _run(agent)
+        finally:
+            await client.stop()
+
+    events = asyncio.run(scenario())
+    results = [event for event in events if event.type == "tool_result"]
+    assert results
+    payload = json.loads(results[0].data["content"])
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "document_not_found"
+    assert "list_files" in payload["error"]["hint"]
+
+
+def test_repeated_identical_failure_escalates_to_a_strategy_change(
+    agent_env, temp_session
+) -> None:
+    """Retrying the exact same failing call twice triggers an anti-spin directive.
+
+    Without this, a model that keeps resubmitting wrong arguments burns the whole
+    iteration ceiling on identical errors.
+    """
+    workspace, _ = agent_env
+    bad_call = _call("read_range", {"path": "不存在的表.xlsx", "sheet_name": "销售"})
+    scripted = ScriptedLLM([bad_call, bad_call, AIMessage(content="确实找不到。")])
+
+    async def scenario():
+        from app.config import get_settings
+
+        client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
+        await client.start()
+        try:
+            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            return await _run(agent)
+        finally:
+            await client.stop()
+
+    events = asyncio.run(scenario())
+    results = [event for event in events if event.type == "tool_result"]
+    assert len(results) == 2
+    assert "连续失败 2 次" in json.loads(results[1].data["content"])["error"]["hint"]
+    assert "连续失败" not in json.loads(results[0].data["content"])["error"]["hint"]
 
 
 def test_unchanged_files_allow_reusing_the_previous_answer(agent_env, temp_session) -> None:

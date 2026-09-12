@@ -102,13 +102,28 @@ class VectorStore:
         """Embed and store chunks. Returns the number of points written."""
         if not chunk_ids:
             return 0
-        self.ensure_collection(workspace_id)
-
         vectors = embeddings.embed_documents(texts)
         if len(vectors) != len(chunk_ids):
             raise VectorStoreError(
                 f"embedding provider returned {len(vectors)} vectors for {len(chunk_ids)} chunks"
             )
+        return self.upsert_vectors(workspace_id, chunk_ids, vectors, payloads)
+
+    def upsert_vectors(
+        self,
+        workspace_id: str,
+        chunk_ids: list[str],
+        vectors: list,
+        payloads: list[dict],
+    ) -> int:
+        """Store already-embedded chunks. Returns the number of points written.
+
+        Separate from ``upsert`` so callers that must not hold a database write
+        lock can embed first and only then take the lock to swap their rows.
+        """
+        if not chunk_ids:
+            return 0
+        self.ensure_collection(workspace_id)
 
         name = collection_name(workspace_id)
         written = 0

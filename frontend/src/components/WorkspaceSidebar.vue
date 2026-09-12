@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import {
   DeleteOutlined,
+  DownloadOutlined,
   FileExcelOutlined,
   FileWordOutlined,
   InboxOutlined,
@@ -10,6 +11,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { api } from '@/api'
 
 const store = useWorkspaceStore()
 const creating = ref(false)
@@ -146,6 +148,16 @@ async function reindex(fileId: string) {
             <div v-if="file.error" class="file-error" :title="file.error">{{ file.error }}</div>
           </div>
           <div class="file-actions">
+            <!-- 提案应用后文件已在磁盘上更新，下载是用户拿到修改结果唯一途径 -->
+            <a
+              v-if="store.activeWorkspaceId"
+              class="file-action-link"
+              :href="api.downloadUrl(store.activeWorkspaceId, file.id)"
+              :download="file.rel_path"
+              title="下载当前文件"
+            >
+              <DownloadOutlined />
+            </a>
             <a-button type="text" size="small" title="重新索引" @click="reindex(file.id)">
               <template #icon><ReloadOutlined /></template>
             </a-button>
@@ -299,6 +311,23 @@ async function reindex(fileId: string) {
 .file-actions {
   display: flex;
   gap: 2px;
+  align-items: center;
+}
+
+.file-action-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.file-action-link:hover {
+  color: var(--accent);
+  background: var(--surface-muted);
 }
 
 .health-warning {

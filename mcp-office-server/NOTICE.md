@@ -22,3 +22,18 @@ path handling, and error semantics with a single sandboxed design.
 No source files were copied verbatim. Both projects are MIT licensed, so
 redistribution of derived work is permitted provided this notice and the license
 text are retained.
+
+## pycel (runtime dependency, not modified)
+
+- Source: https://github.com/dgorissen/pycel
+- License: GPL-3.0
+- Used for: the `calculate` tool's workbook-mode evaluation. A formula is
+  written into a scratch cell of a throwaway temp copy and recomputed by
+  pycel's cell-graph engine, which supports ranges, cross-sheet references and
+  formulas depending on other formulas — including workbooks written by
+  openpyxl where no cached results exist.
+
+No pycel source was copied or modified; it is consumed as an unmodified pip
+dependency. It was chosen over xlcalculator because that project's 0.5 series
+ships an incompatible in-progress API and its 0.4 series cannot build its
+`yearfrac` dependency on Python 3.12.

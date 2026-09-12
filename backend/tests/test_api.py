@@ -30,60 +30,6 @@ def docx_bytes() -> bytes:
     return buffer.getvalue()
 
 
-@pytest.fixture()
-def app_with_temp_storage(tmp_path, monkeypatch):
-    """Rebind the app's storage and database to a per-test location."""
-    from app.config import get_settings
-    from app.db import Base, get_session
-    from app.main import create_app
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    settings = get_settings()
-    data_dir = tmp_path / "data"
-    monkeypatch.setattr(settings, "data_dir", data_dir, raising=False)
-    settings.ensure_directories()
-
-    engine = create_engine(
-        f"sqlite:///{(data_dir / 'api.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-    import app.models  # noqa: F401  (register mappers)
-
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-
-    def override_session():
-        session = factory()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
-    app = create_app()
-    app.dependency_overrides[get_session] = override_session
-    # The MCP sandbox must point at the same temp tree the app writes into. Patching
-    # the parameter builder (rather than the client constructor) keeps the real
-    # lifecycle code under test.
-    import app.mcp_client as mcp_client
-
-    real_builder = mcp_client.build_server_params
-
-    def builder(settings=None, workspace_root=None):
-        return real_builder(settings, workspace_root=settings.workspaces_dir)
-
-    monkeypatch.setattr(mcp_client, "build_server_params", builder)
-    yield app
-    engine.dispose()
-
-
-
-
 @pytest.mark.anyio
 async def test_health_reports_mcp_status(app_with_temp_storage) -> None:
     transport = ASGITransport(app=app_with_temp_storage)

@@ -44,6 +44,10 @@ def _configure_sqlite(dbapi_connection, _connection_record) -> None:  # pragma: 
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    # SQLite allows a single writer; without a generous busy timeout a writer
+    # (e.g. an approval click) fails with ``database is locked`` instead of
+    # briefly queuing behind another short write transaction.
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 

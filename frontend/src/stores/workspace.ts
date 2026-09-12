@@ -265,8 +265,13 @@ export const useWorkspaceStore = defineStore('workspace', {
 
     async applyOperation(operationId: string) {
       if (!this.activeWorkspaceId) return
-      await api.applyOperation(this.activeWorkspaceId, operationId)
-      await Promise.all([this.loadOperations(), this.loadFiles()])
+      try {
+        await api.applyOperation(this.activeWorkspaceId, operationId)
+      } finally {
+        // 失败也要刷新：提案会进入"失败"状态留在待确认面板供重试，
+        // 卡片不能停留在旧的"待确认"视图上误导用户反复点击。
+        await Promise.all([this.loadOperations(), this.loadFiles()])
+      }
     },
 
     async rejectOperation(operationId: string) {

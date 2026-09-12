@@ -18,7 +18,15 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet as OpenpyxlWorksheet
 
-from .errors import CorruptDocument, RangeError, SheetNotFound, ToolError, WriteConflict
+from . import formula_shift
+from .errors import (
+    CorruptDocument,
+    FileLocked,
+    RangeError,
+    SheetNotFound,
+    ToolError,
+    WriteConflict,
+)
 
 MAX_PREVIEW_ROWS = 200
 MAX_PREVIEW_COLS = 60
@@ -42,6 +50,24 @@ def open_workbook(path: Path, *, read_only: bool = False, data_only: bool = Fals
         return load_workbook(path, read_only=read_only, data_only=data_only)
     except Exception as exc:  # openpyxl raises a wide variety of errors
         raise CorruptDocument(f"cannot open workbook '{path.name}': {exc}") from exc
+
+
+def save_workbook(workbook, path: Path) -> None:
+    """Persist the workbook, translating OS-level write failures into ToolError.
+
+    On Windows an openpyxl save raises ``PermissionError`` when the user has the
+    file open in Excel/WPS. Left uncaught, FastMCP wraps it into a plain-text
+    result that the caller cannot distinguish from success.
+    """
+    try:
+        workbook.save(path)
+    except PermissionError as exc:
+        raise FileLocked(
+            "文件正被其他程序占用（如 Excel/WPS），请关闭后重试",
+            detail=str(exc),
+        ) from exc
+    except OSError as exc:
+        raise ToolError(f"写入文件失败: {exc}", detail=str(exc)) from exc
 
 
 def _require_sheet(workbook, sheet_name: str) -> OpenpyxlWorksheet:
@@ -69,12 +95,19 @@ def _jsonify(value: Any) -> Any:
 
 
 def _coerce_input(value: Any) -> Any:
-    """Normalize values coming from the model before writing them to a cell."""
+    """Normalize values coming from the model before writing them to a cell.
+
+    Models occasionally wrap a formula in a small object (``{"formula": "=A1*2"}``)
+    instead of passing the string; the intent is unambiguous, so unwrap it rather
+    than failing the whole write with openpyxl's ``Cannot convert ... to Excel``.
+    """
     if value is None:
         return None
     if isinstance(value, str):
         stripped = value.strip()
         return None if stripped == "" else value
+    if isinstance(value, dict) and set(value) == {"formula"} and isinstance(value["formula"], str):
+        return value["formula"]
     return value
 
 
@@ -210,8 +243,16 @@ def read_range(
 
 
 def find_text(path: Path, query: str, *, max_hits: int = 50) -> list[dict]:
-    """Case-insensitive substring search across all sheets."""
-    needle = query.casefold()
+    """Case-insensitive substring search across all sheets.
+
+    Non-text cells are matched against their string form — the idiom openpyxl
+    based servers use upstream — because a user asking "哪里出现了 299" expects
+    the cell holding 299.0 to be found, not a silent miss. Dates match their
+    ISO form and formulas match their formula text.
+    """
+    needle = query.strip().casefold()
+    if not needle:
+        return []
     hits: list[dict] = []
     workbook = open_workbook(path, read_only=True)
     try:
@@ -220,12 +261,14 @@ def find_text(path: Path, query: str, *, max_hits: int = 50) -> list[dict]:
             for row in sheet.iter_rows():
                 for cell in row:
                     value = cell.value
-                    if isinstance(value, str) and needle in value.casefold():
+                    if value is None:
+                        continue
+                    if needle in str(_jsonify(value)).casefold():
                         hits.append(
                             {
                                 "sheet": name,
                                 "cell": cell.coordinate,
-                                "value": value,
+                                "value": _jsonify(value),
                             }
                         )
                         if len(hits) >= max_hits:
@@ -274,7 +317,7 @@ def update_cells(
                     "after": _jsonify(after),
                 }
             )
-        workbook.save(path)
+        save_workbook(workbook, path)
         return {
             "kind": "excel",
             "sheet": sheet_name,
@@ -308,7 +351,7 @@ def set_formula(
         target = sheet[cell]
         before = _jsonify(target.value)
         target.value = expression
-        workbook.save(path)
+        save_workbook(workbook, path)
         return {
             "kind": "excel",
             "sheet": sheet_name,
@@ -338,7 +381,13 @@ def insert_rows(
         sheet = _require_sheet(workbook, sheet_name)
         before_rows = sheet.max_row or 0
         sheet.insert_rows(start_row, amount=count)
-        workbook.save(path)
+        # openpyxl moves cells but not formula strings; rewrite references the
+        # way Excel does (see formula_shift).
+        formula_shift.shift_workbook_formulas(
+            workbook, affected_sheet=sheet.title, op="insert",
+            start_row=start_row, count=count,
+        )
+        save_workbook(workbook, path)
         return {
             "kind": "excel",
             "sheet": sheet_name,
@@ -372,7 +421,11 @@ def delete_rows(
         sheet = _require_sheet(workbook, sheet_name)
         before_rows = sheet.max_row or 0
         sheet.delete_rows(start_row, amount=count)
-        workbook.save(path)
+        formula_shift.shift_workbook_formulas(
+            workbook, affected_sheet=sheet.title, op="delete",
+            start_row=start_row, count=count,
+        )
+        save_workbook(workbook, path)
         return {
             "kind": "excel",
             "sheet": sheet_name,
@@ -446,7 +499,7 @@ def format_range(
         if horizontal_alignment:
             applied.append(f"alignment={horizontal_alignment}")
 
-        workbook.save(path)
+        save_workbook(workbook, path)
         return {
             "kind": "excel",
             "sheet": sheet_name,

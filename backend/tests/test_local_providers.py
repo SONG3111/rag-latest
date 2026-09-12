@@ -111,3 +111,26 @@ def test_noop_reranker_passes_fused_scores_through() -> None:
     order, scores = NoopReranker().rerank("q", ["a", "b"], top_n=2, fused_scores=[0.5, 0.25])
     assert order == [0, 1]
     assert scores == [0.5, 0.25]
+
+
+def test_body_splitter_measures_with_the_embedding_tokenizer() -> None:
+    """Body chunks are budgeted by the same tokenizer the vector store encodes with."""
+    _require_local_paths()
+
+    from app.retrieval.chunking import build_body_splitter
+
+    settings = get_settings()
+    splitter = build_body_splitter(
+        128, 16, model_path=str(Path(settings.embedding_local_path))
+    )
+
+    text = "员工报销单据应当在费用发生后十个工作日内提交。" * 12
+    measured = splitter.measure(text)
+    # bge-m3 often merges common Chinese words below one token per character,
+    # but 276 characters still overshoots a 128-token budget many times over.
+    assert 128 < measured <= len(text)
+
+    pieces = splitter.splitter.split_text(text)
+    assert len(pieces) > 1
+    assert all(splitter.measure(piece) <= 128 for piece in pieces)
+    assert all(piece.endswith("。") for piece in pieces)
