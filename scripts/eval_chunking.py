@@ -294,6 +294,26 @@ def build_adversarial(corpus_dir: Path) -> None:
     document.add_paragraph(base * 16)  # ~4,800 chars
     document.save(str(corpus_dir / "对抗-超长段落.docx"))
 
+    # one run-on sentence with NO sentence marks — only commas — so the only
+    # possible cuts below the clause tier are mid-phrase hard cuts. This is
+    # the file that makes the separator A/B measurable: the legacy separator
+    # list falls through to character-level cuts, the clause-aware list cuts
+    # at ，edges (round-2 sweep).
+    clauses = (
+        "各部门应当在每个季度结束后的十个工作日内完成本部门上季度全部费用报销单据的初步审核工作"
+        "并对所提交票据的真实性完整性与合规性承担相应的审核责任"
+    )
+    runon = Document()
+    runon.add_heading("对抗-无句号长句", level=1)
+    runon.add_paragraph(
+        "，".join(
+            f"第{index + 1}条{clauses}并按规定时限将审核结果报送财务部门备案"
+            for index in range(24)
+        )
+        + "。"
+    )
+    runon.save(str(corpus_dir / "对抗-无句号长句.docx"))
+
 
 def build_corpus(corpus_dir: Path) -> list[Case]:
     """Materialize every corpus file; return the labeled case list."""
@@ -322,9 +342,11 @@ def build_corpus(corpus_dir: Path) -> list[Case]:
 # --------------------------------------------------------------------------- #
 # fast in-memory index (mirrors the production BM25-only path)
 # --------------------------------------------------------------------------- #
-def make_measure(model_path: str):
+def make_measure(model_path: str, separators: list[str] | None = None):
     """Return (BodySplitter factory, size measure) matching production mode."""
     from app.retrieval.chunking import BODY_SEPARATORS, BodySplitter
+
+    separators = separators or BODY_SEPARATORS
 
     if model_path:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -338,7 +360,7 @@ def make_measure(model_path: str):
                 tokenizer=tokenizer,
                 chunk_size=size,
                 chunk_overlap=overlap,
-                separators=BODY_SEPARATORS,
+                separators=separators,
                 keep_separator="end",
             )
             return BodySplitter(splitter=splitter, measure=measure)
@@ -353,7 +375,7 @@ def make_measure(model_path: str):
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=size,
             chunk_overlap=overlap,
-            separators=BODY_SEPARATORS,
+            separators=separators,
             keep_separator="end",
             length_function=len,
         )
@@ -374,8 +396,9 @@ def build_index(
 ) -> tuple[list[Child], list[Parent]]:
     """Chunk the corpus with one parameter set into lightweight records.
 
-    Adversarial files (``对抗-*``) are chunked for structural stats but never
-    become retrieval candidates, unless a case targets them.
+    Adversarial files (``对抗-*``) are chunked and counted by the structural
+    stats, but never match a subcorpus's ``file_match`` filter, so no BM25
+    retrieval index ever sees them.
     """
     from app.retrieval.bm25 import token_counts
     from app.retrieval.chunking import chunk_excel_groups, chunk_word_groups
@@ -386,10 +409,6 @@ def build_index(
 
     for path in sorted(corpus_dir.iterdir()):
         rel_path = path.name
-        if rel_path.startswith("对抗-") and rel_path not in case_files:
-            structural_only = True
-        else:
-            structural_only = False
         if path.suffix.lower() in {".xlsx", ".xlsm"}:
             groups = chunk_excel_groups(
                 path,
@@ -413,8 +432,6 @@ def build_index(
             parent_index = len(parents)
             parents.append(Parent(group.parent.text, group.parent.location, rel_path))
             for ordinal, child in enumerate(group.children):
-                if structural_only:
-                    continue
                 counts = token_counts(child.text)
                 children.append(
                     Child(
@@ -458,6 +475,10 @@ def search_bm25(
 # metrics
 # --------------------------------------------------------------------------- #
 SENTENCE_END = ("。", "！", "？", "；", "!", "?", ";", "：", ":", "\n")
+# A clause edge （，、,）is not a citation-quality boundary, but it is a
+# semantic unit — strictly better than cutting inside a phrase. The two tiers
+# separate "ugly" (ragged) from "broken" (hard) cuts.
+CLAUSE_END = SENTENCE_END + ("，", "、", ",")
 
 
 def grade(cases: list[Case], index, children, parents) -> dict:
@@ -511,24 +532,41 @@ def failed_cases(cases: list[Case], index, children, parents) -> list[dict]:
 
 
 def structural_stats(children: list[Child], parents: list[Parent], *, size: int, measure, corpus_dir: Path | None = None) -> dict:
-    """Chunker health metrics that need no retrieval: budget compliance and cut quality."""
-    docx_sizes = [measure(c.text) for c in children if c.rel_path.endswith(".docx")]
-    excel_sizes = [measure(c.text) for c in children if c.rel_path.endswith(".xlsx")]
+    """Chunker health metrics that need no retrieval: budget compliance and cut quality.
 
-    # A cut is ragged when a split piece does not end on a sentence mark.
-    ragged = boundaries = 0
+    Cost metrics (child counts, sizes) cover only the retrieval corpus —
+    adversarial ``对抗-*`` files are stress documents, not indexable content,
+    and their inclusion would inflate the cost proxy. Cut-quality metrics
+    (boundary counts, ragged/hard rates) cover every child, because the
+    adversarial files exist precisely to make the splitter fire.
+    """
+    indexed = [c for c in children if not c.rel_path.startswith("对抗-")]
+    docx_sizes = [measure(c.text) for c in indexed if c.rel_path.endswith(".docx")]
+    excel_sizes = [measure(c.text) for c in indexed if c.rel_path.endswith(".xlsx")]
+
+    # A boundary only exists between consecutive *split pieces* of the same
+    # child stream — the previous child must carry a "part" key and the
+    # current one must continue it. Word table rows and single-piece
+    # paragraphs have no "part" and are never boundaries: counting them made
+    # the round-1 sweep report table rows as "ragged cuts" (the 13%-at-768
+    # artifact). A cut is ragged when a piece does not end on a sentence
+    # mark, and hard when it does not end on any punctuation at all.
+    ragged = hard = boundaries = 0
     previous: Child | None = None
     for child in children:
-        part = child.meta.get("part", 0)
+        part = child.meta.get("part")
         if (
             previous is not None
             and previous.parent_index == child.parent_index
-            and part == previous.meta.get("part", -1) + 1
+            and isinstance(previous.meta.get("part"), int)
+            and isinstance(part, int)
+            and part == previous.meta["part"] + 1
         ):
             boundaries += 1
-            if not previous.text.rstrip().endswith(SENTENCE_END):
-                ragged += 1
-        previous = child if child.rel_path.endswith(".docx") or part else None
+            tail = previous.text.rstrip()
+            ragged += int(not tail.endswith(SENTENCE_END))
+            hard += int(not tail.endswith(CLAUSE_END))
+        previous = child
 
     def pct(values: list[int], quantile: float):
         if not values:
@@ -537,13 +575,13 @@ def structural_stats(children: list[Child], parents: list[Parent], *, size: int,
         return ordered[min(len(ordered) - 1, int(len(ordered) * quantile))]
 
     rows_per_parent: dict[int, int] = {}
-    for child in children:
+    for child in indexed:
         if child.rel_path.endswith(".xlsx"):
             rows_per_parent[child.parent_index] = rows_per_parent.get(child.parent_index, 0) + 1
 
     row_counts = list(rows_per_parent.values())
     return {
-        "children": len(children),
+        "children": len(indexed),
         "parents": len(parents),
         "docx_children": len(docx_sizes),
         "docx_size_p50": pct(docx_sizes, 0.5),
@@ -559,6 +597,7 @@ def structural_stats(children: list[Child], parents: list[Parent], *, size: int,
         "excel_rows_per_parent_max": pct(row_counts, 0.9999),
         "split_boundaries": boundaries,
         "ragged_cut_pct": round(ragged / boundaries, 4) if boundaries else 0.0,
+        "hard_cut_pct": round(hard / boundaries, 4) if boundaries else 0.0,
     }
 
 
@@ -820,7 +859,7 @@ def main() -> int:
                 f"size={size:<4} overlap={overlap:<4} "
                 f"recall@5={recall_all:.4f} mrr@5={mrr_all:.4f} {sub_recall} "
                 f"({build_seconds}s, {stats['children']} children, "
-                f"ragged={stats['ragged_cut_pct']:.0%})"
+                f"hard={stats['hard_cut_pct']:.0%}, ragged={stats['ragged_cut_pct']:.0%})"
             )
 
         # ---- rows_per_parent sweep on the business sheets ----
@@ -946,48 +985,34 @@ def main() -> int:
                     f"recall@5={sub_recall:.4f} children={len(children)}"
                 )
 
-        # ---- strategy A/B: separators extended with the Chinese comma ----
-        # A pathological >budget sentence otherwise hard-cuts at ""; giving the
-        # splitter "，" before that keeps clause boundaries.
-        from transformers import AutoTokenizer as _AT
+        # ---- strategy A/B: clause-aware separators (round 2) ----
+        # Round 1 appended "，" AFTER the space separator and measured zero
+        # difference — Chinese text has no word spaces, so a variant that
+        # ranks the clause mark below " " never fires. The corrected design
+        # compares the legacy list against the clause-aware list now shipped
+        # in chunking.py (，、, before " " and ""), at the production budget
+        # (512/64) and the larger candidate (768/64).
+        from app.retrieval.chunking import BODY_SEPARATORS as CLAUSE_SEPARATORS
 
-        from app.retrieval.chunking import BODY_SEPARATORS, BodySplitter
+        LEGACY_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "!", "?", ";", " ", ""]
 
-        extended_separators = BODY_SEPARATORS[:-1] + ["，", ",", " ", ""]
-
-        def extended_factory(size: int, overlap: int):
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-            splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-                tokenizer=extended_tokenizer,
-                chunk_size=size,
-                chunk_overlap=overlap,
-                separators=extended_separators,
-                keep_separator="end",
-            )
-            return BodySplitter(splitter=splitter, measure=measure)
-
-        extended_tokenizer = (
-            _AT.from_pretrained(model_path) if model_path else None
-        )
         separator_results = []
-        if extended_tokenizer is not None:
-            for label, split_factory in [
-                ("baseline-separators", factory),
-                ("extended-separators", extended_factory),
-            ]:
+        for label, separators in [
+            ("legacy-separators", LEGACY_SEPARATORS),
+            ("clause-aware-separators", list(CLAUSE_SEPARATORS)),
+        ]:
+            split_factory, split_measure = make_measure(model_path, separators=separators)
+            for size, overlap in [(512, 64), (768, 64)]:
                 children, parents = build_index(
                     corpus_dir,
                     case_files,
-                    size=512,
-                    overlap=64,
+                    size=size,
+                    overlap=overlap,
                     rows_per_parent=12,
                     splitter_factory=split_factory,
-                    measure=measure,
+                    measure=split_measure,
                 )
-                stats = structural_stats(
-                    children, parents, size=512, measure=measure
-                )
+                stats = structural_stats(children, parents, size=size, measure=split_measure)
                 by_subcorpus = {}
                 for name, file_match, case_match in subcorpora:
                     sub_children = [
@@ -1001,15 +1026,30 @@ def main() -> int:
                 separator_results.append(
                     {
                         "variant": label,
+                        "size": size,
+                        "overlap": overlap,
                         "by_subcorpus": by_subcorpus,
                         "stats": stats,
+                        # The run-on file is where the separator tiers
+                        # actually diverge; the rest of the corpus cuts at
+                        # sentence marks under both variants.
+                        "runon_stats": structural_stats(
+                            [c for c in children if c.rel_path == "对抗-无句号长句.docx"],
+                            parents,
+                            size=size,
+                            measure=split_measure,
+                        ),
                     }
                 )
+                runon = separator_results[-1]["runon_stats"]
                 print(
-                    f"{label:<22} children={stats['children']} "
+                    f"{label:<26} size={size:<4} children={stats['children']} "
+                    f"hard={stats['hard_cut_pct']:.1%} "
                     f"ragged={stats['ragged_cut_pct']:.1%} "
                     f"max={stats['docx_size_max']} "
-                    f"cmrc-pressure={by_subcorpus['cmrc']['cmrc-pressure']['recall@5']}"
+                    f"runon_hard={runon['hard_cut_pct']:.0%} "
+                    f"runon_boundaries={runon['split_boundaries']} "
+                    f"pressure={by_subcorpus['cmrc']['cmrc-pressure']['recall@5']}"
                 )
 
         equivalence = equivalence_check(

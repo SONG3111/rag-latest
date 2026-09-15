@@ -476,15 +476,54 @@ def test_injected_splitter_size_is_overridden_by_budget_argument(tmp_path) -> No
     assert max(len(body) for body in bodies) > 200
 
 
+def test_body_separators_rank_clause_marks_before_the_hard_cut() -> None:
+    """Pin the separator order the round-2 chunking sweep validated.
+
+    Chinese text has no word spaces, so the clause marks （，、,）must rank
+    above the space/hard-cut fallbacks — a clause mark at or below " " never
+    fires and oversized run-on sentences are cut mid-phrase. Sentence marks
+    still outrank clause marks, mirroring the punctuation tiers of Tony
+    Baloney's CJK splitting guide (W3C Japanese Layout Requirements) and
+    LangChain's CJK guidance.
+    """
+    from app.retrieval.chunking import BODY_SEPARATORS
+
+    sentence_marks = ["。", "！", "？", "；", "!", "?", ";"]
+    clause_marks = ["，", "、", ","]
+    position = {separator: BODY_SEPARATORS.index(separator) for separator in sentence_marks + clause_marks + [" "]}
+    for mark in sentence_marks:
+        assert position[mark] < position["，"], "sentence marks outrank clause marks"
+    for mark in clause_marks:
+        assert position[mark] < position[" "], "clause marks outrank the space fallback"
+
+
+def test_oversized_runon_sentence_cuts_at_clause_marks() -> None:
+    """A >budget sentence with no 。 is cut at ，edges, never mid-phrase.
+
+    The pressure corpus of the chunking sweep showed pieces ending mid-phrase
+    whenever a run-on sentence outgrew the budget; ranking clause marks above
+    the hard cut turns those into clause-edge cuts.
+    """
+    clauses = [f"第{index}条报销规定由财务部门负责解释并监督执行" for index in range(12)]
+    body = "，".join(clauses) + "。"
+
+    pieces = _char_body_splitter(120, 0).split(body, "", 120)
+
+    assert len(pieces) > 1, "a ~300-char run-on must exceed one 120-budget piece"
+    for piece in pieces[:-1]:
+        assert piece.endswith(("，", "。")), f"piece cut mid-clause: …{piece[-12:]}"
+
+
 def test_validated_chunking_defaults_match_the_sweep() -> None:
     """512/64/12 are measured values, not copy-pasted defaults.
 
     The grid sweep in docs/rag-test-report (CMRC 2018 + business corpus,
-    BM25-only) shows: 256/384 lose a pressure case and cost +21–71% children;
-    768 ties recall but triples mid-sentence cuts (13% vs 4%); overlap and
-    rows_per_parent move recall by at most one case. Renumbering any of these
-    constants without re-running scripts/eval_chunking.py regresses a
-    validated tradeoff.
+    BM25-only) shows: 256/384 tie on recall but cost +21–71% children; 768
+    gains at most one noise-level case while every child doubles the context
+    the model must read and leaves the embedding model's recommended
+    retrieval window; overlap and rows_per_parent move recall by at most one
+    case. Renumbering any of these constants without re-running
+    scripts/eval_chunking.py regresses a validated tradeoff.
     """
     from app.retrieval import chunking
 

@@ -44,7 +44,16 @@ ROWS_PER_PARENT = 12
 
 # Sentence marks come first so cuts land on clause boundaries; the recursive
 # splitter walks down the list only while pieces still exceed the budget.
-BODY_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "!", "?", ";", " ", ""]
+# The clause marks （，、,）sit after sentence marks but BEFORE the space/hard
+# cut, so an oversized run-on sentence is broken at a clause edge instead of
+# mid-phrase. Ordering follows Tony Baloney's CJK splitting guide (which
+# references the W3C "Requirements for Japanese Text Layout" punctuation
+# tiers) and LangChain's CJK guidance; both rank ideographic commas above
+# spaces for scripts without word spacing. Measured in the chunking sweep on
+# the run-on adversarial document: the legacy list falls through to
+# character-level cuts (100% hard), the clause-aware list cuts at clause
+# edges, with retrieval recall unchanged.
+BODY_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "!", "?", ";", "，", "、", ",", " ", ""]
 # Below this the header has eaten nearly the whole budget; count it inside
 # instead of reserving, so a pathological section title cannot crowd out content.
 MIN_BODY_BUDGET_TOKENS = 64

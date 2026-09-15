@@ -53,10 +53,10 @@
           }
         }
       },
-      "build_seconds": 1.78,
+      "build_seconds": 1.84,
       "stats": {
         "children": 763,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 691,
         "docx_size_p50": 224,
         "docx_size_p95": 249,
@@ -67,8 +67,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 422,
-        "ragged_cut_pct": 0.0095
+        "split_boundaries": 472,
+        "ragged_cut_pct": 0.0996,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -114,10 +115,10 @@
           }
         }
       },
-      "build_seconds": 1.3,
+      "build_seconds": 1.34,
       "stats": {
         "children": 782,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 710,
         "docx_size_p50": 223,
         "docx_size_p95": 250,
@@ -128,8 +129,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 441,
-        "ragged_cut_pct": 0.0091
+        "split_boundaries": 493,
+        "ragged_cut_pct": 0.0953,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -175,10 +177,10 @@
           }
         }
       },
-      "build_seconds": 1.39,
+      "build_seconds": 1.44,
       "stats": {
         "children": 830,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 758,
         "docx_size_p50": 225,
         "docx_size_p95": 250,
@@ -189,8 +191,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 489,
-        "ragged_cut_pct": 0.0082
+        "split_boundaries": 580,
+        "ragged_cut_pct": 0.1466,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -236,10 +239,10 @@
           }
         }
       },
-      "build_seconds": 1.55,
+      "build_seconds": 1.63,
       "stats": {
         "children": 1030,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 958,
         "docx_size_p50": 231,
         "docx_size_p95": 250,
@@ -250,8 +253,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 689,
-        "ragged_cut_pct": 0.0058
+        "split_boundaries": 764,
+        "ragged_cut_pct": 0.0798,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -297,10 +301,10 @@
           }
         }
       },
-      "build_seconds": 1.28,
+      "build_seconds": 1.33,
       "stats": {
         "children": 531,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 459,
         "docx_size_p50": 316,
         "docx_size_p95": 375,
@@ -311,8 +315,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 190,
-        "ragged_cut_pct": 0.0211
+        "split_boundaries": 207,
+        "ragged_cut_pct": 0.0821,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -358,10 +363,10 @@
           }
         }
       },
-      "build_seconds": 1.29,
+      "build_seconds": 1.41,
       "stats": {
         "children": 532,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 460,
         "docx_size_p50": 319,
         "docx_size_p95": 376,
@@ -372,8 +377,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 191,
-        "ragged_cut_pct": 0.0209
+        "split_boundaries": 208,
+        "ragged_cut_pct": 0.0817,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -419,10 +425,10 @@
           }
         }
       },
-      "build_seconds": 1.33,
+      "build_seconds": 1.38,
       "stats": {
         "children": 544,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 472,
         "docx_size_p50": 321,
         "docx_size_p95": 375,
@@ -433,8 +439,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 203,
-        "ragged_cut_pct": 0.0197
+        "split_boundaries": 221,
+        "ragged_cut_pct": 0.0814,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -480,10 +487,10 @@
           }
         }
       },
-      "build_seconds": 1.35,
+      "build_seconds": 1.42,
       "stats": {
         "children": 580,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 508,
         "docx_size_p50": 327,
         "docx_size_p95": 376,
@@ -494,8 +501,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 239,
-        "ragged_cut_pct": 0.0167
+        "split_boundaries": 260,
+        "ragged_cut_pct": 0.0731,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -541,10 +549,10 @@
           }
         }
       },
-      "build_seconds": 1.27,
+      "build_seconds": 1.31,
       "stats": {
         "children": 446,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 374,
         "docx_size_p50": 349,
         "docx_size_p95": 497,
@@ -555,8 +563,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 105,
-        "ragged_cut_pct": 0.0381
+        "split_boundaries": 106,
+        "ragged_cut_pct": 0.0189,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -602,10 +611,10 @@
           }
         }
       },
-      "build_seconds": 1.29,
+      "build_seconds": 1.34,
       "stats": {
         "children": 447,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 375,
         "docx_size_p50": 350,
         "docx_size_p95": 498,
@@ -616,8 +625,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 106,
-        "ragged_cut_pct": 0.0377
+        "split_boundaries": 107,
+        "ragged_cut_pct": 0.0187,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -663,10 +673,10 @@
           }
         }
       },
-      "build_seconds": 1.27,
+      "build_seconds": 1.33,
       "stats": {
         "children": 450,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 378,
         "docx_size_p50": 352,
         "docx_size_p95": 498,
@@ -677,8 +687,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 109,
-        "ragged_cut_pct": 0.0367
+        "split_boundaries": 111,
+        "ragged_cut_pct": 0.027,
+        "hard_cut_pct": 0.0
       },
       "baseline_failures": [
         {
@@ -756,10 +767,10 @@
           }
         }
       },
-      "build_seconds": 1.3,
+      "build_seconds": 1.38,
       "stats": {
         "children": 460,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 388,
         "docx_size_p50": 362,
         "docx_size_p95": 499,
@@ -770,8 +781,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 119,
-        "ragged_cut_pct": 0.0336
+        "split_boundaries": 121,
+        "ragged_cut_pct": 0.0248,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -817,10 +829,10 @@
           }
         }
       },
-      "build_seconds": 1.22,
+      "build_seconds": 1.26,
       "stats": {
         "children": 372,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 300,
         "docx_size_p50": 376,
         "docx_size_p95": 742,
@@ -831,8 +843,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 31,
-        "ragged_cut_pct": 0.129
+        "split_boundaries": 29,
+        "ragged_cut_pct": 0.0345,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -878,10 +891,10 @@
           }
         }
       },
-      "build_seconds": 1.21,
+      "build_seconds": 1.27,
       "stats": {
         "children": 372,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 300,
         "docx_size_p50": 376,
         "docx_size_p95": 742,
@@ -892,8 +905,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 31,
-        "ragged_cut_pct": 0.129
+        "split_boundaries": 29,
+        "ragged_cut_pct": 0.0345,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -939,10 +953,10 @@
           }
         }
       },
-      "build_seconds": 1.23,
+      "build_seconds": 1.31,
       "stats": {
         "children": 373,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 301,
         "docx_size_p50": 376,
         "docx_size_p95": 731,
@@ -953,8 +967,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 32,
-        "ragged_cut_pct": 0.125
+        "split_boundaries": 31,
+        "ragged_cut_pct": 0.0645,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -1000,10 +1015,10 @@
           }
         }
       },
-      "build_seconds": 1.22,
+      "build_seconds": 1.31,
       "stats": {
         "children": 377,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 305,
         "docx_size_p50": 376,
         "docx_size_p95": 739,
@@ -1014,8 +1029,9 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 36,
-        "ragged_cut_pct": 0.1111
+        "split_boundaries": 35,
+        "ragged_cut_pct": 0.0571,
+        "hard_cut_pct": 0.0
       }
     }
   ],
@@ -1046,7 +1062,7 @@
       },
       "stats": {
         "children": 72,
-        "parents": 274,
+        "parents": 275,
         "docx_children": 0,
         "docx_size_p50": null,
         "docx_size_p95": null,
@@ -1058,7 +1074,8 @@
         "excel_rows_per_parent_p50": 6,
         "excel_rows_per_parent_max": 6,
         "split_boundaries": 0,
-        "ragged_cut_pct": 0.0
+        "ragged_cut_pct": 0.0,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -1083,7 +1100,7 @@
       },
       "stats": {
         "children": 72,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 0,
         "docx_size_p50": null,
         "docx_size_p95": null,
@@ -1095,7 +1112,8 @@
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
         "split_boundaries": 0,
-        "ragged_cut_pct": 0.0
+        "ragged_cut_pct": 0.0,
+        "hard_cut_pct": 0.0
       }
     },
     {
@@ -1120,7 +1138,7 @@
       },
       "stats": {
         "children": 72,
-        "parents": 263,
+        "parents": 264,
         "docx_children": 0,
         "docx_size_p50": null,
         "docx_size_p95": null,
@@ -1132,7 +1150,8 @@
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 24,
         "split_boundaries": 0,
-        "ragged_cut_pct": 0.0
+        "ragged_cut_pct": 0.0,
+        "hard_cut_pct": 0.0
       }
     }
   ],
@@ -1254,7 +1273,9 @@
   ],
   "separator_variants": [
     {
-      "variant": "baseline-separators",
+      "variant": "legacy-separators",
+      "size": 512,
+      "overlap": 64,
       "by_subcorpus": {
         "cmrc": {
           "cmrc-standard": {
@@ -1295,7 +1316,7 @@
       },
       "stats": {
         "children": 450,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 378,
         "docx_size_p50": 352,
         "docx_size_p95": 498,
@@ -1306,12 +1327,109 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 109,
-        "ragged_cut_pct": 0.0367
+        "split_boundaries": 118,
+        "ragged_cut_pct": 0.0847,
+        "hard_cut_pct": 0.0847
+      },
+      "runon_stats": {
+        "children": 0,
+        "parents": 267,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 0,
+        "excel_size_p50": null,
+        "excel_size_p95": null,
+        "excel_rows_per_parent_p50": null,
+        "excel_rows_per_parent_max": null,
+        "split_boundaries": 10,
+        "ragged_cut_pct": 1.0,
+        "hard_cut_pct": 1.0
       }
     },
     {
-      "variant": "extended-separators",
+      "variant": "legacy-separators",
+      "size": 768,
+      "overlap": 64,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9533,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 373,
+        "parents": 267,
+        "docx_children": 301,
+        "docx_size_p50": 376,
+        "docx_size_p95": 731,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 35,
+        "ragged_cut_pct": 0.1714,
+        "hard_cut_pct": 0.1429
+      },
+      "runon_stats": {
+        "children": 0,
+        "parents": 267,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 0,
+        "excel_size_p50": null,
+        "excel_size_p95": null,
+        "excel_rows_per_parent_p50": null,
+        "excel_rows_per_parent_max": null,
+        "split_boundaries": 6,
+        "ragged_cut_pct": 1.0,
+        "hard_cut_pct": 0.8333
+      }
+    },
+    {
+      "variant": "clause-aware-separators",
+      "size": 512,
+      "overlap": 64,
       "by_subcorpus": {
         "cmrc": {
           "cmrc-standard": {
@@ -1352,7 +1470,7 @@
       },
       "stats": {
         "children": 450,
-        "parents": 266,
+        "parents": 267,
         "docx_children": 378,
         "docx_size_p50": 352,
         "docx_size_p95": 498,
@@ -1363,8 +1481,103 @@
         "excel_size_p95": 119,
         "excel_rows_per_parent_p50": 12,
         "excel_rows_per_parent_max": 12,
-        "split_boundaries": 109,
-        "ragged_cut_pct": 0.0367
+        "split_boundaries": 111,
+        "ragged_cut_pct": 0.027,
+        "hard_cut_pct": 0.0
+      },
+      "runon_stats": {
+        "children": 0,
+        "parents": 267,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 0,
+        "excel_size_p50": null,
+        "excel_size_p95": null,
+        "excel_rows_per_parent_p50": null,
+        "excel_rows_per_parent_max": null,
+        "split_boundaries": 3,
+        "ragged_cut_pct": 1.0,
+        "hard_cut_pct": 0.0
+      }
+    },
+    {
+      "variant": "clause-aware-separators",
+      "size": 768,
+      "overlap": 64,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9533,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 373,
+        "parents": 267,
+        "docx_children": 301,
+        "docx_size_p50": 376,
+        "docx_size_p95": 731,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 31,
+        "ragged_cut_pct": 0.0645,
+        "hard_cut_pct": 0.0
+      },
+      "runon_stats": {
+        "children": 0,
+        "parents": 267,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 0,
+        "excel_size_p50": null,
+        "excel_size_p95": null,
+        "excel_rows_per_parent_p50": null,
+        "excel_rows_per_parent_max": null,
+        "split_boundaries": 2,
+        "ragged_cut_pct": 1.0,
+        "hard_cut_pct": 0.0
       }
     }
   ],
