@@ -95,7 +95,11 @@ class Settings(BaseSettings):
     # --- retrieval ---
     # Word body children are sized in *tokens*, measured with the embedding
     # model's own tokenizer, so a chunk's encoded length is what the vector
-    # store actually sees. bge-m3 guidance puts retrieval units at <=512 tokens.
+    # store actually sees. bge-m3 guidance puts retrieval units at <=512 tokens;
+    # the 512/64 pair was then validated by measurement (grid sweep over
+    # CMRC 2018 + the business corpus, docs/rag-test-report): 256/384 lose a
+    # pressure case and cost +21-71% children, 768 ties recall but triples
+    # mid-sentence cuts. Re-run scripts/eval_chunking.py before changing these.
     chunk_size_tokens: int = Field(default=512)
     chunk_overlap_tokens: int = Field(default=64)
     retrieval_vector_top_k: int = Field(default=20)

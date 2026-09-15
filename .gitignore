@@ -30,7 +30,9 @@ Thumbs.db
 .zcode/
 wid_tmp.txt
 
-docs/
+docs/*
+!docs/rag-test-report/
+!docs/rag-test-report/data/
 
 # --- regenerable manual test data (scripts/make_manual_test_files.py) ---
 testdata/

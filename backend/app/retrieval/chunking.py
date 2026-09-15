@@ -78,6 +78,12 @@ class BodySplitter:
     are cut small enough that the *embedded* child (header + piece) stays
     within ``budget``. A pathologically long header falls back to counting it
     inside the budget rather than crowding the body out entirely.
+
+    Budget contract (pinned by a regression test and discovered the hard way
+    in the chunking sweep): ``split`` sizes pieces by its ``budget`` argument,
+    never by the splitter's own ``chunk_size`` — ``_resized`` overwrites it.
+    Callers injecting a ``body_splitter`` must pass the matching
+    ``chunk_size_tokens``/``chunk_overlap_tokens`` arguments too.
     """
 
     splitter: Any

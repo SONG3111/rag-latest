@@ -1,0 +1,1376 @@
+{
+  "measure_mode": "tokens",
+  "tokenizer": "C:/code/agent/rag/models/bge-m3",
+  "seed": 20260916,
+  "corpus": {
+    "cmrc_articles_standard": 240,
+    "cmrc_articles_pressure": 60,
+    "cmrc_cases_standard": 150,
+    "cmrc_cases_pressure": 60,
+    "business_cases": 28
+  },
+  "grid": [
+    {
+      "size": 256,
+      "overlap": 0,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9625,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9922,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9625,
+            "child_precision@5": 0.95
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.78,
+      "stats": {
+        "children": 763,
+        "parents": 266,
+        "docx_children": 691,
+        "docx_size_p50": 224,
+        "docx_size_p95": 249,
+        "docx_size_max": 255,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 422,
+        "ragged_cut_pct": 0.0095
+      }
+    },
+    {
+      "size": 256,
+      "overlap": 32,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9632,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9933,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9625,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.3,
+      "stats": {
+        "children": 782,
+        "parents": 266,
+        "docx_children": 710,
+        "docx_size_p50": 223,
+        "docx_size_p95": 250,
+        "docx_size_max": 256,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 441,
+        "ragged_cut_pct": 0.0091
+      }
+    },
+    {
+      "size": 256,
+      "overlap": 64,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9657,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9956,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9667,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.39,
+      "stats": {
+        "children": 830,
+        "parents": 266,
+        "docx_children": 758,
+        "docx_size_p50": 225,
+        "docx_size_p95": 250,
+        "docx_size_max": 255,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 489,
+        "ragged_cut_pct": 0.0082
+      }
+    },
+    {
+      "size": 256,
+      "overlap": 128,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9678,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9956,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.975,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.55,
+      "stats": {
+        "children": 1030,
+        "parents": 266,
+        "docx_children": 958,
+        "docx_size_p50": 231,
+        "docx_size_p95": 250,
+        "docx_size_max": 255,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 689,
+        "ragged_cut_pct": 0.0058
+      }
+    },
+    {
+      "size": 384,
+      "overlap": 0,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9566,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9867,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9528,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.28,
+      "stats": {
+        "children": 531,
+        "parents": 266,
+        "docx_children": 459,
+        "docx_size_p50": 316,
+        "docx_size_p95": 375,
+        "docx_size_max": 382,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 190,
+        "ragged_cut_pct": 0.0211
+      }
+    },
+    {
+      "size": 384,
+      "overlap": 32,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9601,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.99,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9583,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.29,
+      "stats": {
+        "children": 532,
+        "parents": 266,
+        "docx_children": 460,
+        "docx_size_p50": 319,
+        "docx_size_p95": 376,
+        "docx_size_max": 382,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 191,
+        "ragged_cut_pct": 0.0209
+      }
+    },
+    {
+      "size": 384,
+      "overlap": 64,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9636,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9933,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9639,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.33,
+      "stats": {
+        "children": 544,
+        "parents": 266,
+        "docx_children": 472,
+        "docx_size_p50": 321,
+        "docx_size_p95": 375,
+        "docx_size_max": 382,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 203,
+        "ragged_cut_pct": 0.0197
+      }
+    },
+    {
+      "size": 384,
+      "overlap": 128,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9622,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.99,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9667,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.35,
+      "stats": {
+        "children": 580,
+        "parents": 266,
+        "docx_children": 508,
+        "docx_size_p50": 327,
+        "docx_size_p95": 376,
+        "docx_size_max": 383,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 239,
+        "ragged_cut_pct": 0.0167
+      }
+    },
+    {
+      "size": 512,
+      "overlap": 0,
+      "recall@5": 0.979,
+      "mrr@5": 0.9654,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9625,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.27,
+      "stats": {
+        "children": 446,
+        "parents": 266,
+        "docx_children": 374,
+        "docx_size_p50": 349,
+        "docx_size_p95": 497,
+        "docx_size_max": 505,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 105,
+        "ragged_cut_pct": 0.0381
+      }
+    },
+    {
+      "size": 512,
+      "overlap": 32,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9636,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9556,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.29,
+      "stats": {
+        "children": 447,
+        "parents": 266,
+        "docx_children": 375,
+        "docx_size_p50": 350,
+        "docx_size_p95": 498,
+        "docx_size_max": 506,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 106,
+        "ragged_cut_pct": 0.0377
+      }
+    },
+    {
+      "size": 512,
+      "overlap": 64,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9636,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9556,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.27,
+      "stats": {
+        "children": 450,
+        "parents": 266,
+        "docx_children": 378,
+        "docx_size_p50": 352,
+        "docx_size_p95": 498,
+        "docx_size_max": 506,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 109,
+        "ragged_cut_pct": 0.0367
+      },
+      "baseline_failures": [
+        {
+          "query": "钟惺有哪些代表作？",
+          "file": "长文汇编-04.docx",
+          "expect": "《浣花溪记》、《游武夷山记》及《夏梅说》等"
+        },
+        {
+          "query": "报销咋整",
+          "file": "员工费用报销管理制度.docx",
+          "expect": "发票"
+        },
+        {
+          "query": "出差花销最多报多少",
+          "file": "员工费用报销管理制度.docx",
+          "expect": "5000"
+        },
+        {
+          "query": "请客吃饭能报几个钱",
+          "file": "员工费用报销管理制度.docx",
+          "expect": "3000"
+        },
+        {
+          "query": "谁还没给批啊",
+          "file": "2026年第一季度报销明细.xlsx",
+          "expect": "待审批"
+        },
+        {
+          "query": "买文具能报多少",
+          "file": "员工费用报销管理制度.docx",
+          "expect": "2000"
+        }
+      ]
+    },
+    {
+      "size": 512,
+      "overlap": 128,
+      "recall@5": 0.9748,
+      "mrr@5": 0.9664,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9667,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.3,
+      "stats": {
+        "children": 460,
+        "parents": 266,
+        "docx_children": 388,
+        "docx_size_p50": 362,
+        "docx_size_p95": 499,
+        "docx_size_max": 505,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 119,
+        "ragged_cut_pct": 0.0336
+      }
+    },
+    {
+      "size": 768,
+      "overlap": 0,
+      "recall@5": 0.979,
+      "mrr@5": 0.9672,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9617,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.22,
+      "stats": {
+        "children": 372,
+        "parents": 266,
+        "docx_children": 300,
+        "docx_size_p50": 376,
+        "docx_size_p95": 742,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 31,
+        "ragged_cut_pct": 0.129
+      }
+    },
+    {
+      "size": 768,
+      "overlap": 32,
+      "recall@5": 0.979,
+      "mrr@5": 0.9672,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9617,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.21,
+      "stats": {
+        "children": 372,
+        "parents": 266,
+        "docx_children": 300,
+        "docx_size_p50": 376,
+        "docx_size_p95": 742,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 31,
+        "ragged_cut_pct": 0.129
+      }
+    },
+    {
+      "size": 768,
+      "overlap": 64,
+      "recall@5": 0.979,
+      "mrr@5": 0.9651,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9533,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.23,
+      "stats": {
+        "children": 373,
+        "parents": 266,
+        "docx_children": 301,
+        "docx_size_p50": 376,
+        "docx_size_p95": 731,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 32,
+        "ragged_cut_pct": 0.125
+      }
+    },
+    {
+      "size": 768,
+      "overlap": 128,
+      "recall@5": 0.979,
+      "mrr@5": 0.9644,
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 1.0,
+            "mrr@5": 0.9506,
+            "child_precision@5": 0.9833
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "build_seconds": 1.22,
+      "stats": {
+        "children": 377,
+        "parents": 266,
+        "docx_children": 305,
+        "docx_size_p50": 376,
+        "docx_size_p95": 739,
+        "docx_size_max": 763,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 36,
+        "ragged_cut_pct": 0.1111
+      }
+    }
+  ],
+  "best_combo": {
+    "size": 768,
+    "overlap": 0
+  },
+  "rows_sweep": [
+    {
+      "rows_per_parent": 6,
+      "by_subcorpus": {
+        "biz-demo": {
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.9,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 72,
+        "parents": 274,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 6,
+        "excel_rows_per_parent_max": 6,
+        "split_boundaries": 0,
+        "ragged_cut_pct": 0.0
+      }
+    },
+    {
+      "rows_per_parent": 12,
+      "by_subcorpus": {
+        "biz-demo": {
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.9,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 72,
+        "parents": 266,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 0,
+        "ragged_cut_pct": 0.0
+      }
+    },
+    {
+      "rows_per_parent": 24,
+      "by_subcorpus": {
+        "biz-demo": {
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.9,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 72,
+        "parents": 263,
+        "docx_children": 0,
+        "docx_size_p50": null,
+        "docx_size_p95": null,
+        "docx_size_max": null,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 24,
+        "split_boundaries": 0,
+        "ragged_cut_pct": 0.0
+      }
+    }
+  ],
+  "naive_baseline": [
+    {
+      "strategy": "naive-fixed-width",
+      "size": 512,
+      "overlap": 64,
+      "subcorpus": "cmrc",
+      "by_category": {
+        "cmrc-standard": {
+          "total": 150,
+          "recall@5": 1.0,
+          "mrr@5": 0.9933,
+          "child_precision@5": 1.0
+        },
+        "cmrc-pressure": {
+          "total": 60,
+          "recall@5": 0.9833,
+          "mrr@5": 0.9278,
+          "child_precision@5": 0.9833
+        }
+      },
+      "children": 362
+    },
+    {
+      "strategy": "naive-fixed-width",
+      "size": 512,
+      "overlap": 64,
+      "subcorpus": "biz-demo",
+      "by_category": {
+        "biz-doc": {
+          "total": 14,
+          "recall@5": 0.7857,
+          "mrr@5": 0.75,
+          "child_precision@5": 0.7857
+        },
+        "biz-sheet": {
+          "total": 10,
+          "recall@5": 0.9,
+          "mrr@5": 0.75,
+          "child_precision@5": 0.9
+        }
+      },
+      "children": 2
+    },
+    {
+      "strategy": "naive-fixed-width",
+      "size": 512,
+      "overlap": 64,
+      "subcorpus": "biz-sheet60",
+      "by_category": {
+        "biz-sheet60": {
+          "total": 4,
+          "recall@5": 1.0,
+          "mrr@5": 1.0,
+          "child_precision@5": 1.0
+        }
+      },
+      "children": 5
+    },
+    {
+      "strategy": "naive-fixed-width",
+      "size": 256,
+      "overlap": 64,
+      "subcorpus": "cmrc",
+      "by_category": {
+        "cmrc-standard": {
+          "total": 150,
+          "recall@5": 0.9867,
+          "mrr@5": 0.8847,
+          "child_precision@5": 0.9867
+        },
+        "cmrc-pressure": {
+          "total": 60,
+          "recall@5": 0.9667,
+          "mrr@5": 0.8631,
+          "child_precision@5": 0.9667
+        }
+      },
+      "children": 849
+    },
+    {
+      "strategy": "naive-fixed-width",
+      "size": 256,
+      "overlap": 64,
+      "subcorpus": "biz-demo",
+      "by_category": {
+        "biz-doc": {
+          "total": 14,
+          "recall@5": 0.7857,
+          "mrr@5": 0.75,
+          "child_precision@5": 0.7857
+        },
+        "biz-sheet": {
+          "total": 10,
+          "recall@5": 0.9,
+          "mrr@5": 0.75,
+          "child_precision@5": 0.9
+        }
+      },
+      "children": 3
+    },
+    {
+      "strategy": "naive-fixed-width",
+      "size": 256,
+      "overlap": 64,
+      "subcorpus": "biz-sheet60",
+      "by_category": {
+        "biz-sheet60": {
+          "total": 4,
+          "recall@5": 1.0,
+          "mrr@5": 1.0,
+          "child_precision@5": 1.0
+        }
+      },
+      "children": 11
+    }
+  ],
+  "separator_variants": [
+    {
+      "variant": "baseline-separators",
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9556,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 450,
+        "parents": 266,
+        "docx_children": 378,
+        "docx_size_p50": 352,
+        "docx_size_p95": 498,
+        "docx_size_max": 506,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 109,
+        "ragged_cut_pct": 0.0367
+      }
+    },
+    {
+      "variant": "extended-separators",
+      "by_subcorpus": {
+        "cmrc": {
+          "cmrc-standard": {
+            "total": 150,
+            "recall@5": 1.0,
+            "mrr@5": 0.9967,
+            "child_precision@5": 1.0
+          },
+          "cmrc-pressure": {
+            "total": 60,
+            "recall@5": 0.9833,
+            "mrr@5": 0.9556,
+            "child_precision@5": 0.9667
+          }
+        },
+        "biz-demo": {
+          "biz-doc": {
+            "total": 14,
+            "recall@5": 0.7143,
+            "mrr@5": 0.7143,
+            "child_precision@5": 0.5714
+          },
+          "biz-sheet": {
+            "total": 10,
+            "recall@5": 0.9,
+            "mrr@5": 0.85,
+            "child_precision@5": 0.9
+          }
+        },
+        "biz-sheet60": {
+          "biz-sheet60": {
+            "total": 4,
+            "recall@5": 1.0,
+            "mrr@5": 1.0,
+            "child_precision@5": 1.0
+          }
+        }
+      },
+      "stats": {
+        "children": 450,
+        "parents": 266,
+        "docx_children": 378,
+        "docx_size_p50": 352,
+        "docx_size_p95": 498,
+        "docx_size_max": 506,
+        "docx_over_budget_pct": 0.0,
+        "excel_children": 72,
+        "excel_size_p50": 117,
+        "excel_size_p95": 119,
+        "excel_rows_per_parent_p50": 12,
+        "excel_rows_per_parent_max": 12,
+        "split_boundaries": 109,
+        "ragged_cut_pct": 0.0367
+      }
+    }
+  ],
+  "equivalence": {
+    "checked": 12,
+    "mismatches": 0,
+    "detail": []
+  }
+}

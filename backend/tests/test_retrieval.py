@@ -442,6 +442,57 @@ def test_word_body_splitter_reserves_the_header_budget(tmp_path) -> None:
     assert all("短句二" in child.text for child in children)
 
 
+def test_injected_splitter_size_is_overridden_by_budget_argument(tmp_path) -> None:
+    """Pin the BodySplitter budget contract the chunking sweep tripped over.
+
+    ``BodySplitter.split`` sizes pieces by its ``budget`` argument, never by
+    the splitter's own configured ``chunk_size`` — ``_resized`` overwrites the
+    latter. Callers injecting ``body_splitter`` must pass the matching
+    ``chunk_size_tokens``/``chunk_overlap_tokens``; a mismatched pair silently
+    produces default-budget children no matter what the splitter was built
+    with (exactly what scripts/eval_chunking.py got wrong on its first run).
+    """
+    path = tmp_path / "制度.docx"
+    document = Document()
+    document.add_heading("报销规定", level=1)
+    document.add_paragraph("员工报销单据应当在费用发生后十个工作日内提交。" * 12)
+    document.save(str(path))
+
+    # Splitter built for 200, budget argument left at the 512 default.
+    groups = list(
+        chunk_word_groups(
+            path,
+            "制度.docx",
+            body_splitter=_char_body_splitter(200, 30),
+        )
+    )
+    bodies = [
+        child.text.removeprefix("文件：制度.docx\n章节：报销规定\n")
+        for group in groups
+        for child in group.children
+    ]
+    # The 512 budget governs: pieces run far past what a 200-budget splitter
+    # would have produced.
+    assert max(len(body) for body in bodies) > 200
+
+
+def test_validated_chunking_defaults_match_the_sweep() -> None:
+    """512/64/12 are measured values, not copy-pasted defaults.
+
+    The grid sweep in docs/rag-test-report (CMRC 2018 + business corpus,
+    BM25-only) shows: 256/384 lose a pressure case and cost +21–71% children;
+    768 ties recall but triples mid-sentence cuts (13% vs 4%); overlap and
+    rows_per_parent move recall by at most one case. Renumbering any of these
+    constants without re-running scripts/eval_chunking.py regresses a
+    validated tradeoff.
+    """
+    from app.retrieval import chunking
+
+    assert chunking.DEFAULT_CHUNK_TOKENS == 512
+    assert chunking.DEFAULT_CHUNK_OVERLAP_TOKENS == 64
+    assert chunking.ROWS_PER_PARENT == 12
+
+
 def test_body_splitter_defaults_to_character_fallback(tmp_path) -> None:
     from app.retrieval.chunking import build_body_splitter
 
