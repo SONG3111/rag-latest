@@ -123,6 +123,36 @@ def build_chat_model(
     )
 
 
+def build_resilient_chat_model(settings: Settings | None = None):
+    """Return the agent's chat model wrapped in the fallback chain.
+
+    Primary is ``llm_model``; ``llm_fallback_models`` appends candidates in order.
+    Without fallbacks the wrapper degenerates to a single candidate, preserving
+    current behavior. The reranker/rewriter paths keep using ``build_chat_model``
+    directly — they already degrade on their own and must not inherit the agent's
+    breaker state.
+    """
+    from .resilience import ResilientChatModel
+
+    settings = settings or get_settings()
+    # Breaker keys are concrete model names: if a fallback happens to equal the
+    # primary, they share breaker state, which is the desired semantics (a
+    # failing model is a failing model).
+    primary = settings.llm_model
+    candidates = [(primary, build_chat_model(settings))]
+    seen = {primary}
+    for name in settings.fallback_model_list:
+        if name in seen:
+            continue
+        seen.add(name)
+        candidates.append((name, build_chat_model(settings, model=name)))
+    return ResilientChatModel(
+        candidates,
+        threshold=settings.llm_breaker_threshold,
+        cooldown=settings.llm_breaker_cooldown,
+    )
+
+
 @lru_cache(maxsize=4)
 def _cached_embeddings(
     api_key: str, base_url: str, model: str, dimensions: int

@@ -46,11 +46,32 @@ mcp = FastMCP(
 
 
 def _ok(payload: Any) -> str:
-    return json.dumps({"ok": True, "data": payload}, ensure_ascii=False, default=str)
+    # allow_nan=False keeps the envelope strict JSON: a stray Infinity would be
+    # unparseable for standard JSON clients (it would raise here, but that
+    # happens inside the tool's try-block and lands in the envelope backstop).
+    return json.dumps({"ok": True, "data": payload}, ensure_ascii=False, default=str, allow_nan=False)
 
 
 def _handle(exc: ToolError) -> str:
-    return json.dumps(error_payload(exc), ensure_ascii=False, default=str)
+    return json.dumps(error_payload(exc), ensure_ascii=False, default=str, allow_nan=False)
+
+
+def _unexpected(exc: Exception) -> str:
+    """Envelope backstop for failures no tool expected to raise.
+
+    The contract is that tools answer with the structured envelope instead of
+    raising. Layering mirrors the upstream excel-mcp-server (domain errors
+    handled per tool, everything else logged), but instead of re-raising we
+    keep the surprise inside the envelope so the agent always gets parseable,
+    actionable output.
+    """
+    logger.exception("unexpected tool failure")
+    return json.dumps(
+        error_payload(ToolError(f"unexpected failure: {exc}", detail=type(exc).__name__)),
+        ensure_ascii=False,
+        default=str,
+        allow_nan=False,
+    )
 
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -75,14 +96,17 @@ def list_files() -> str:
         return _ok({"files": sandbox.list_documents()})
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
 def get_doc_structure(path: str) -> str:
     """查看一个文档的整体结构。
 
-    Excel：返回每个 sheet 的名称、行列数、首行表头。
-    Word：返回段落总数、表格数量、标题大纲（含段落下标）以及每张表的表头。
+    Excel：返回每个 sheet 的名称、行列数、首行表头，以及合并单元格区域
+    （merged_ranges，表头语义的信号）。Word：返回段落总数、表格数量、
+    标题大纲（含段落下标）以及每张表的表头。
 
     在读取具体内容或修改之前，应先用本工具了解文档全貌。
     """
@@ -94,6 +118,8 @@ def get_doc_structure(path: str) -> str:
         return _ok(word_ops.document_structure(resolved))
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -129,6 +155,8 @@ def read_range(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -151,6 +179,8 @@ def read_paragraphs(
         return _ok(word_ops.read_paragraphs(resolved, start=start, end=end))
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -166,6 +196,8 @@ def read_table(path: str, table_index: int = 0) -> str:
         return _ok(word_ops.read_table(resolved, table_index))
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -186,6 +218,8 @@ def find_text(path: str, query: str) -> str:
         return _ok({"query": query, "hits": hits})
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -227,6 +261,8 @@ def calculate(
         return _ok({"expression": expression, "value": excel_ops._jsonify(value)})
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -244,10 +280,14 @@ def update_cells(
     Args:
         path: 相对工作区的 Excel 文件路径。
         sheet_name: 工作表名称。
-        updates: 形如 [{"cell": "B3", "value": 1200}, ...] 的修改列表；value 为 null 表示清空。
+        updates: 形如 [{"cell": "B3", "value": 1200}, ...] 的修改列表；value 为 null 或
+            空字符串表示清空（纯空格是有效内容，按原样写入）。
+            注意：以 "=" 开头的字符串会按 Excel 语义存为公式（与手工粘贴一致）；
+            单元格最长 32767 字符（Excel 上限），超长会被拒绝而不是截断。
         expected_digest: 上次 read_range 返回的 digest，用于检测文件是否已被改动。
 
     返回每条修改的 before/after，可直接用于向用户展示变更预览。
+    写入合并单元格区域时只允许写左上角格，其余位置会被拒绝并提示。
     """
     try:
         resolved = sandbox.resolve_document(path)
@@ -258,6 +298,8 @@ def update_cells(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -290,6 +332,8 @@ def set_formula(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -315,6 +359,8 @@ def insert_rows(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -338,6 +384,8 @@ def delete_rows(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -375,6 +423,235 @@ def format_range(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def insert_columns(
+    path: str,
+    sheet_name: str,
+    start_col: int,
+    count: int = 1,
+    expected_digest: str | None = None,
+) -> str:
+    """在 Excel 指定列位置**之前**插入空列，原有列整体右移，公式引用自动重写。**会写入用户的文件。**
+
+    start_col 从 1 开始计数（A=1），count 为插入列数。
+    向表格最右侧追加数据不需要本工具：直接用 update_cells 写入即可。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.insert_columns(
+                resolved, sheet_name, start_col, count, expected_digest=expected_digest
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def delete_columns(
+    path: str,
+    sheet_name: str,
+    start_col: int,
+    count: int = 1,
+    expected_digest: str | None = None,
+) -> str:
+    """删除 Excel 中的若干整列，右侧列左移，公式引用自动重写。**会写入用户的文件，属不可逆操作。**
+
+    start_col 从 1 开始计数（A=1），count 为删除列数。使用前必须先向用户确认。
+    只想清空某几列的值而不移动表格时，请改用 update_cells（value 传 null）。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.delete_columns(
+                resolved, sheet_name, start_col, count, expected_digest=expected_digest
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def copy_range(
+    path: str,
+    src_sheet: str,
+    src_range: str,
+    dst_sheet: str,
+    dst_cell: str,
+    expected_digest: str | None = None,
+) -> str:
+    """整块复制 Excel 区域（值、格式、公式）到目标位置。**会写入用户的文件。**
+
+    Args:
+        src_range: 源区域，如 "A1:C10"。
+        dst_cell: 目标左上角单元格（不是区域）。
+
+    公式的相对引用会按 Excel 语义平移到新位置（绝对引用 $A$1 不变），与手工
+    复制粘贴一致。改个别单元格的值用 update_cells；复制整块数据（如把明细复制
+    到汇总表）用本工具。源或目标区域碰到合并单元格会报错，需先 unmerge_cells。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.copy_range(
+                resolved, src_sheet, src_range, dst_sheet, dst_cell,
+                expected_digest=expected_digest,
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def delete_range(
+    path: str,
+    sheet_name: str,
+    range_text: str,
+    shift: str = "up",
+    expected_digest: str | None = None,
+) -> str:
+    """删除 Excel 矩形区域并让相邻内容补位。**会写入用户的文件，属不可逆操作。**
+
+    shift="up" 时下方内容上移补位；shift="left" 时右侧内容左移补位。
+    使用前必须先向用户确认。与 delete_rows/delete_columns 的分工：
+    删整行/整列用它们；只删一块区域（保留周围结构）用本工具；
+    只清值不移动用 update_cells（value 传 null）。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.delete_range(
+                resolved, sheet_name, range_text, shift, expected_digest=expected_digest
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def merge_cells(
+    path: str,
+    sheet_name: str,
+    range_text: str,
+    expected_digest: str | None = None,
+) -> str:
+    """合并 Excel 单元格区域（如跨列标题）。**会写入用户的文件。**
+
+    与 Excel 一致：只保留左上角单元格的值，其余值会被丢弃。重复合并同一区域
+    是无害的幂等操作。取消合并用 unmerge_cells（需传完整的合并区域）。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.merge_cells(resolved, sheet_name, range_text, expected_digest=expected_digest)
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def unmerge_cells(
+    path: str,
+    sheet_name: str,
+    range_text: str,
+    expected_digest: str | None = None,
+) -> str:
+    """取消 Excel 合并单元格。**会写入用户的文件。**
+
+    range_text 必须与现有合并区域完全一致（可用 get_doc_structure 返回的
+    merged_ranges 查询），只选中合并区域的一部分无法取消合并。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.unmerge_cells(resolved, sheet_name, range_text, expected_digest=expected_digest)
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def find_replace(
+    path: str,
+    query: str,
+    replacement: str,
+    sheet_name: str | None = None,
+    include_formulas: bool = False,
+    expected_digest: str | None = None,
+) -> str:
+    """在 Excel 中按内容批量查找替换文本，返回每个被改动的单元格。**会写入用户的文件。**
+
+    Args:
+        query: 要查找的文本（大小写不敏感）。
+        replacement: 替换后的文本。
+        sheet_name: 限定工作表；留空则替换所有工作表。
+        include_formulas: 是否同时替换公式文本中的匹配（默认 false，只处理文本单元格）。
+
+    匹配语义与 find_text 一致。已经知道确切坐标时用 update_cells；
+    改名、口径调整这类"同一处文本出现在多处"的场景用本工具。
+    数字和日期单元格不会被改动。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.find_replace(
+                resolved, query, replacement,
+                sheet_name=sheet_name, include_formulas=include_formulas,
+                expected_digest=expected_digest,
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=WRITE)
+def manage_sheets(
+    path: str,
+    action: str,
+    sheet_name: str | None = None,
+    new_name: str | None = None,
+    expected_digest: str | None = None,
+) -> str:
+    """对 Excel 工作表本身执行新建/重命名/复制/删除。**会写入用户的文件，删除不可逆。**
+
+    Args:
+        action: create（新建，需 new_name）/ rename（重命名，需 sheet_name + new_name）/
+            copy（复制为副本，需 sheet_name + new_name）/ delete（删除，需 sheet_name）。
+
+    单元格内容的修改请用其他写入工具，本工具只处理工作表层级。
+    重命名或删除工作表后，其他公式中指向旧表名的引用不会自动改写，
+    返回结果会列出受影响的公式位置。
+    """
+    try:
+        resolved = sandbox.resolve_document(path)
+        return _ok(
+            excel_ops.manage_sheets(
+                resolved, action, sheet_name, new_name=new_name,
+                expected_digest=expected_digest,
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -398,6 +675,8 @@ def replace_text(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=WRITE)
@@ -419,6 +698,8 @@ def update_table_cell(
         )
     except ToolError as exc:
         return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
 
 
 def main() -> None:

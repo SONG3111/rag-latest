@@ -35,6 +35,10 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str | None]]] = {
         ("level", "VARCHAR(10)", "'child'"),
         ("parent_id", "VARCHAR(32)", None),
     ],
+    "messages": [
+        # Thumbs feedback on assistant turns; NULL keeps pre-feedback rows valid.
+        ("feedback", "VARCHAR(10)", None),
+    ],
 }
 
 _INDEXES: list[tuple[str, str, str]] = [

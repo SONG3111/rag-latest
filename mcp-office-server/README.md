@@ -15,9 +15,10 @@
 工具由宿主应用（后端）在用户确认后才真正执行。这样 Server 可以独立复用，审批策略
 完全留在 Agent 层。
 
-**精选工具面。** 只注册约 12 个核心工具。图表、透视表、文档保护、批注、脚注等能力
+**精选工具面。** 只注册 22 个核心工具。图表、透视表、文档保护、批注、脚注等能力
 保留在实现层（`excel_ops` / `word_ops`）但不注册——工具过多会显著降低模型的工具
-选择准确率。
+选择准确率。每个工具的职责边界互不重叠（改值用 `update_cells`、删块补位用
+`delete_range`、删整行用 `delete_rows`……），降低模型的选型歧义。
 
 **统一错误语义。** 工具不抛异常，而是返回
 `{"ok": false, "error": {"code": ..., "message": ..., "detail": ...}}`，让 Agent
@@ -30,20 +31,26 @@
 | 工具 | 说明 |
 |---|---|
 | `list_files` | 列出工作区内可操作的文档 |
-| `get_doc_structure` | Excel 返回 sheet/行列/表头；Word 返回大纲与表格索引 |
+| `get_doc_structure` | Excel 返回 sheet/行列/表头/合并区域；Word 返回大纲与表格索引 |
 | `read_range` | 读取 Excel 区域的值，公式与缓存值分列返回 |
 | `read_paragraphs` | 按下标读取 Word 正文段落 |
 | `read_table` | 读取 Word 中一张表的全部单元格 |
 | `find_text` | 跨 sheet / 段落 / 表格定位文本 |
+| `calculate` | 纯算式或工作簿公式现算（只读，不修改文件） |
 
 写入类（`destructiveHint`）：
 
 | 工具 | 说明 |
 |---|---|
-| `update_cells` | 修改单元格值，返回逐格 before/after |
+| `update_cells` | 修改单元格值，返回逐格 before/after；value 传 null 清空 |
 | `set_formula` | 写入公式 |
-| `insert_rows` | 插入空行 |
-| `delete_rows` | 删除行（不可逆） |
+| `insert_rows` / `delete_rows` | 插入空行 / 删除整行，公式引用自动重写 |
+| `insert_columns` / `delete_columns` | 插入空列 / 删除整列，公式引用自动重写 |
+| `copy_range` | 整块复制值/格式/公式，相对引用按 Excel 语义平移 |
+| `delete_range` | 删除矩形区域并让下方/右侧内容补位 |
+| `merge_cells` / `unmerge_cells` | 合并 / 取消合并单元格 |
+| `find_replace` | 按内容跨 sheet 批量替换文本（可选含公式） |
+| `manage_sheets` | 工作表新建 / 重命名 / 复制 / 删除 |
 | `format_range` | 基础格式：粗斜体、字体色、填充色、数字格式、对齐 |
 | `replace_text` | Word 查找替换，支持跨 run 匹配 |
 | `update_table_cell` | 修改 Word 表格单元格文本 |

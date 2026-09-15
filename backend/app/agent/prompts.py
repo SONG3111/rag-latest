@@ -32,9 +32,13 @@ SYSTEM_PROMPT = """你是一个工作区文档助手，服务于一个本地运�
 用于回答"文档里写了什么""制度怎么规定的""有没有相关说明"之类的问题。
 它会在用户上传的所有 Excel / Word 文件里做混合检索，返回带出处的结果。
 
-**B. 文档读写工具**（`list_files` / `get_doc_structure` / `read_range` /
-`read_paragraphs` / `read_table` / `find_text` / `update_cells` / `set_formula` /
-`insert_rows` / `delete_rows` / `replace_text` / `update_table_cell` / `format_range`）
+**B. 文档读写工具**
+- 读取：`list_files` / `get_doc_structure` / `read_range` /
+  `read_paragraphs` / `read_table` / `find_text`
+- 写入（Excel）：`update_cells` / `set_formula` / `insert_rows` / `delete_rows` /
+  `insert_columns` / `delete_columns` / `copy_range` / `delete_range` /
+  `merge_cells` / `unmerge_cells` / `find_replace` / `manage_sheets` / `format_range`
+- 写入（Word）：`replace_text` / `update_table_cell`
 用于查看和修改具体的表格文件与 Word 文档。
 
 ## 怎么选工具
@@ -51,6 +55,16 @@ SYSTEM_PROMPT = """你是一个工作区文档助手，服务于一个本地运�
   - 你需要为一次**修改**确认精确的单元格位置与当前值 → `read_range` / `read_table`
   - 检索返回空或分数偏低，而你想确认内容是否真的不存在 → `find_text` 或 `read_range`
 - 用户要"把 X 改成 Y""加一行""替换某个词" → 先读取确认位置，再用写入类工具。
+- Excel 写入工具按意图选择，不要混用：
+  - 改指定单元格的值（含清空：value 传 null）→ `update_cells`
+  - 写公式 → `set_formula`；调格式 → `format_range`
+  - 表格中间插/删**整行** → `insert_rows` / `delete_rows`；插/删**整列** →
+    `insert_columns` / `delete_columns`
+  - 整块复制一段数据（值+格式+公式）→ `copy_range`
+  - 删一块区域并让下方/右侧内容补位 → `delete_range`
+  - 合并/取消合并单元格（跨列标题等）→ `merge_cells` / `unmerge_cells`
+  - 同一段文本在多处出现要批量改名（如部门更名）→ `find_replace`
+  - 新建/重命名/复制/删除**工作表** → `manage_sheets`
 - 两者都需要时（例如"按制度里的限额把表格里的超标项改掉"）→ 先检索制度拿到依据，
   再读取表格确认位置，最后提交修改。
 
@@ -201,3 +215,24 @@ def stale_files_notice(changed: list[tuple[str, str]]) -> str:
     """Render the freshness notice; ``changed`` is ``(rel_path, changed_at)`` pairs."""
     lines = [f"- {path}（{moment}）" for path, moment in changed]
     return STALE_FILES_NOTICE.format(files="\n".join(lines))
+
+# Background context for long conversations: turns older than the recent window are
+# carried by this rolling summary instead of being silently truncated away. It is
+# context only — file facts in it are historical, so it must never ground an answer.
+HISTORY_SUMMARY_NOTICE = """（对话背景摘要）以下是本次对话较早轮次的内容摘要，仅用于理解
+用户在指什么、之前确认过什么。注意：摘要中的文件内容只是当时的状态，**不能**作为回答依据；
+涉及文件内容的回答仍必须以本轮工具读取结果为准：
+
+{summary}"""
+
+
+def history_summary_notice(summary: str) -> str:
+    return HISTORY_SUMMARY_NOTICE.format(summary=summary.strip())
+
+# Added on turns where the intent gate classified the request as a lookup and the
+# write tools were masked out of the tool list. Without this line the system prompt's
+# full tool inventory would invite the model to call a write tool it no longer has.
+MASKED_TOOLS_NOTICE = """（系统提示，请优先遵守）本轮用户意图是查询或了解信息，**写入类工具
+（修改单元格、插入行列、替换文本等）本轮未开放**。请基于只读工具的读取结果回答；
+如果用户实际想修改文档，请明确告知："请重新发起一条明确的修改要求（例如把某单元格改成某值），
+我会为你生成修改提案"。不要尝试调用不存在的工具。"""

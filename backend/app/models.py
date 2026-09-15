@@ -150,11 +150,69 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, default="", nullable=False)
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # "up" | "down" | null. The value of thumbs is the data loop: every down
+    # vote is a candidate for the evaluation set, so it must live on the row
+    # the user actually saw.
+    feedback: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=_now, index=True, nullable=False
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="messages")
+
+
+class ConversationSummary(Base):
+    """Rolling summary of a conversation's older turns, one row per workspace.
+
+    Long conversations used to be truncated to the most recent N messages, which
+    silently dropped the opening context ("那个文件最初是干嘛的"). The summary is
+    regenerated over all but the most recent turns whenever compaction runs, so it
+    carries the early context forward at a bounded token cost. It deliberately
+    never carries file-freshness facts — staleness is decided deterministically by
+    timestamp comparison in the routes layer, not by what a summary happens to keep.
+    """
+
+    __tablename__ = "conversation_summaries"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # How many of the oldest messages the current summary covers; the compaction
+    # trigger compares this against the message count to decide if there is new
+    # material to fold in.
+    covered_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+
+class RunTrace(Base):
+    """One node of one chat turn's execution trace.
+
+    A run is one user turn; its nodes follow the RAGent trace shape (rewrite /
+    dense / bm25 / fuse / rerank / select for the retrieval pipeline, agent /
+    tools / nudge / direct for the agent loop) with per-node duration, bounded
+    input/output summaries, and the error when the node failed. Written in a
+    background task after the turn, so tracing can never break the turn itself.
+    """
+
+    __tablename__ = "run_traces"
+    __table_args__ = (Index("ix_run_trace_run", "workspace_id", "run_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    node: Mapped[str] = mapped_column(String(50), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    input: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    output: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, nullable=False
+    )
 
 
 class Operation(Base):

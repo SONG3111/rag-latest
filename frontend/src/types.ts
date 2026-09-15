@@ -59,6 +59,7 @@ export interface StoredMessage {
   content: string
   citations: Citation[] | null
   tool_calls: unknown[] | null
+  feedback: 'up' | 'down' | null
   created_at: string
 }
 
@@ -94,9 +95,37 @@ export interface ChatTurn {
   id: string
   role: 'user' | 'assistant'
   content: string
+  /** Reasoning-channel text streamed during this turn; never persisted server-side. */
+  thinking?: string
+  /** Backend status notice for this turn (model fallback, timeout, ...). */
+  notice?: string
   citations: Citation[]
   activities: ToolActivity[]
   proposals: Operation[]
   streaming: boolean
   error?: string
+  /** Server-side message id, present once the turn has been persisted. */
+  messageId?: string
+  /** Thumbs feedback attached to the persisted message. */
+  feedback?: 'up' | 'down' | null
+}
+
+/** Original text window behind one citation, fetched by the preview endpoint. */
+export interface CitationPreview {
+  kind: 'excel' | 'word_paragraphs' | 'word_table'
+  file: string
+  location: string
+  /** excel */
+  sheet?: string
+  start_row?: number
+  rows?: unknown[][]
+  /** word paragraphs */
+  paragraphs?: { index: number; text: string; is_heading?: boolean }[]
+  /** word table */
+  table_index?: number
+  /**
+   * What to highlight: for excel/word_table the 0-based row index within
+   * `rows`; for word_paragraphs the paragraph's absolute index.
+   */
+  highlight?: number | null
 }

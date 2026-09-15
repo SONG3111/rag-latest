@@ -1,4 +1,5 @@
 import type {
+  CitationPreview,
   DocumentFile,
   IndexingResult,
   McpTool,
@@ -66,6 +67,21 @@ export const api = {
 
   listMessages: (workspaceId: string) =>
     request<StoredMessage[]>(`${BASE}/workspaces/${workspaceId}/messages`),
+
+  setMessageFeedback: (workspaceId: string, messageId: string, feedback: 'up' | 'down' | 'none') =>
+    request<StoredMessage>(
+      `${BASE}/workspaces/${workspaceId}/messages/${messageId}/feedback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      },
+    ),
+
+  previewCitation: (workspaceId: string, file: string, location: string) =>
+    request<CitationPreview>(
+      `${BASE}/workspaces/${workspaceId}/preview?file=${encodeURIComponent(file)}&location=${encodeURIComponent(location)}`,
+    ),
 
   listOperations: (workspaceId: string) =>
     request<Operation[]>(`${BASE}/workspaces/${workspaceId}/operations`),

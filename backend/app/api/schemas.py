@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -58,7 +60,14 @@ class MessageRead(BaseModel):
     content: str
     citations: list | None = None
     tool_calls: list | None = None
+    feedback: str | None = None
     created_at: datetime
+
+
+class MessageFeedback(BaseModel):
+    """Thumbs feedback on one assistant message; "none" clears it."""
+
+    feedback: Literal["up", "down", "none"]
 
 
 class OperationRead(BaseModel):

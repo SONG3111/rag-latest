@@ -27,6 +27,7 @@ fully interpretable.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +45,17 @@ logger = logging.getLogger(__name__)
 
 SCORE_SOURCE_RERANK = "rerank"
 SCORE_SOURCE_FUSED = "fused"
+
+
+def _open_span(trace, node: str, input_summary: dict[str, Any] | None):
+    """Open a trace span, or a no-op stand-in when tracing is off.
+
+    The no-op record is a plain dict, so the pipeline can write ``span["output"]``
+    unconditionally without branching on whether tracing is enabled.
+    """
+    if trace is None:
+        return contextlib.nullcontext({"output": {}, "error": None})
+    return trace.span(node, input_summary)
 
 
 @dataclass
@@ -213,8 +225,14 @@ class Retriever:
         use_rewrite: bool | None = None,
         history: list[str] | None = None,
         relevance_threshold: float | None = None,
+        trace: "TraceCollector | None" = None,
     ) -> list[RetrievedChunk]:
-        """Run the full pipeline and return the best passages."""
+        """Run the full pipeline and return the best passages.
+
+        ``trace`` optionally receives one span per stage (rewrite / dense / bm25 /
+        fuse / rerank / select), so a wrong answer can be attributed to the stage
+        that produced it.
+        """
         original = (query or "").strip()
         if not original:
             return []
@@ -226,10 +244,16 @@ class Retriever:
         rewritten = False
         rewrite_error: str | None = None
         if rewrite_enabled:
-            result = self.rewriter.rewrite(original, history)
-            effective = result.query
-            rewritten = result.rewritten
-            rewrite_error = result.error
+            with _open_span(trace, "rewrite", {"query": original}) as span:
+                result = self.rewriter.rewrite(original, history)
+                effective = result.query
+                rewritten = result.rewritten
+                rewrite_error = result.error
+                span["output"] = {
+                    "effective_query": effective,
+                    "rewritten": rewritten,
+                    "error": rewrite_error,
+                }
 
         run = RetrievalRun(
             original_query=original,
@@ -247,25 +271,30 @@ class Retriever:
         top_k = top_k or self.settings.rerank_top_n
 
         # --- sparse leg ---
-        bm25 = BM25Index(children)
-        sparse_hits = bm25.search(effective, top_k=self.settings.retrieval_bm25_top_k)
-        sparse_ids = [chunk_id for chunk_id, _ in sparse_hits]
+        with _open_span(trace, "bm25", {"query": effective}) as span:
+            bm25 = BM25Index(children)
+            sparse_hits = bm25.search(effective, top_k=self.settings.retrieval_bm25_top_k)
+            sparse_ids = [chunk_id for chunk_id, _ in sparse_hits]
+            span["output"] = {"hits": len(sparse_ids)}
 
         # --- dense leg ---
         dense_ids: list[str] = []
         if use_dense:
-            try:
-                dense_ids = self.vector_store.search(
-                    self.workspace_id,
-                    self.embeddings,
-                    effective,
-                    self.settings.retrieval_vector_top_k,
-                )
-            except Exception as exc:
-                self._warn_once(
-                    "dense",
-                    f"dense retrieval unavailable, continuing with BM25 only: {exc}",
-                )
+            with _open_span(trace, "dense", {"query": effective}) as span:
+                try:
+                    dense_ids = self.vector_store.search(
+                        self.workspace_id,
+                        self.embeddings,
+                        effective,
+                        self.settings.retrieval_vector_top_k,
+                    )
+                    span["output"] = {"hits": len(dense_ids)}
+                except Exception as exc:
+                    self._warn_once(
+                        "dense",
+                        f"dense retrieval unavailable, continuing with BM25 only: {exc}",
+                    )
+                    span["error"] = str(exc)[:500]
 
         raw_lists = [ids for ids in (dense_ids, sparse_ids) if ids]
         if not raw_lists:
@@ -273,12 +302,14 @@ class Retriever:
             return []
 
         run.candidates_before_dedup = sum(len(ids) for ids in raw_lists)
-        ranked_lists = [self._dedupe(ids, by_id) for ids in raw_lists]
-        ranked_lists = [ids for ids in ranked_lists if ids]
-        if not ranked_lists:
-            self.last_run = run
-            return []
-        run.candidates_after_dedup = sum(len(ids) for ids in ranked_lists)
+        with _open_span(trace, "fuse", {"lists": [len(ids) for ids in raw_lists]}) as span:
+            ranked_lists = [self._dedupe(ids, by_id) for ids in raw_lists]
+            ranked_lists = [ids for ids in ranked_lists if ids]
+            if not ranked_lists:
+                self.last_run = run
+                return []
+            run.candidates_after_dedup = sum(len(ids) for ids in ranked_lists)
+            span["output"] = {"candidates_after_dedup": run.candidates_after_dedup}
 
         if len(ranked_lists) == 1:
             fused = [
@@ -302,19 +333,21 @@ class Retriever:
         candidate_texts = [by_id[chunk_id].text for chunk_id in candidate_ids]
 
         # --- rerank ---
-        order = list(range(len(candidates)))
-        scores = list(fused_scores)
-        score_source = SCORE_SOURCE_FUSED
-        if use_rerank and len(candidates) > 1:
-            try:
-                order, scores = self.reranker.rerank(
-                    effective, candidate_texts, top_k, fused_scores
-                )
-                if getattr(self.reranker, "produces_relevance_scores", False):
-                    score_source = SCORE_SOURCE_RERANK
-            except Exception as exc:
-                self._warn_once("rerank", f"reranking failed, keeping fused order: {exc}")
-                order, scores = list(range(len(candidates))), list(fused_scores)
+        with _open_span(trace, "rerank", {"query": effective, "candidates": len(candidates)}) as span:
+            order = list(range(len(candidates)))
+            scores = list(fused_scores)
+            score_source = SCORE_SOURCE_FUSED
+            if use_rerank and len(candidates) > 1:
+                try:
+                    order, scores = self.reranker.rerank(
+                        effective, candidate_texts, top_k, fused_scores
+                    )
+                    if getattr(self.reranker, "produces_relevance_scores", False):
+                        score_source = SCORE_SOURCE_RERANK
+                except Exception as exc:
+                    self._warn_once("rerank", f"reranking failed, keeping fused order: {exc}")
+                    order, scores = list(range(len(candidates))), list(fused_scores)
+            span["output"] = {"score_source": score_source}
 
         # --- relevance gate ---
         # Only meaningful when the scores are actual relevance estimates; applying a
@@ -378,6 +411,13 @@ class Retriever:
             )
 
         self.last_run = run
+        if trace is not None:
+            with _open_span(trace, "select", {"threshold_applied": run.threshold_applied}) as span:
+                span["output"] = {
+                    "returned": len(results),
+                    "filtered_by_threshold": run.filtered_by_threshold,
+                    "files": sorted({result.rel_path for result in results}),
+                }
         return results
 
 

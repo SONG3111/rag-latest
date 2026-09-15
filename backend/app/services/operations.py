@@ -39,11 +39,13 @@ PATH_ARGUMENTS = ("path", "filepath", "file_path")
 _CELL_RE = re.compile(r"^([A-Za-z]{1,3})(\d+)$")
 
 
-def _shift_formula_text(formula: str, *, sheet_name: Any, kind: str, start: int, count: int) -> str:
+def _shift_formula_text(
+    formula: str, *, sheet_name: Any, kind: str, start: int, count: int, axis: str = "row"
+) -> str:
     """Rewrite the A1 references inside a not-yet-written formula string.
 
     A pending ``set_formula`` was authored against the pre-shift layout, so the
-    references it makes must follow the same row movement as its target cell.
+    references it makes must follow the same movement as its target cell.
     This reuses the MCP server's own shifter — the exact logic that keeps
     already-written formulas correct — instead of a second implementation.
     """
@@ -52,7 +54,8 @@ def _shift_formula_text(formula: str, *, sheet_name: Any, kind: str, start: int,
     sheet = str(sheet_name or "")
     op = "delete" if kind == "delete" else "insert"
     return shift_formula_references(
-        formula, own_sheet=sheet, affected_sheet=sheet, op=op, start_row=start, count=count
+        formula, own_sheet=sheet, affected_sheet=sheet, op=op,
+        start=start, count=count, axis=axis,
     )
 
 
@@ -112,6 +115,32 @@ def summarize_operation(tool_name: str, rel_path: str, arguments: dict[str, Any]
         return f"删除 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 {arguments.get('start_row')} 行起的 {arguments.get('count', 1)} 行（不可逆）"
     if tool_name == "format_range":
         return f"为 {rel_path} 的 {arguments.get('start_cell', '')}:{arguments.get('end_cell', '')} 设置格式"
+    if tool_name == "insert_columns":
+        return f"在 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 {arguments.get('start_col')} 列起插入 {arguments.get('count', 1)} 列"
+    if tool_name == "delete_columns":
+        return f"删除 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 {arguments.get('start_col')} 列起的 {arguments.get('count', 1)} 列（不可逆）"
+    if tool_name == "copy_range":
+        return (
+            f"把 {rel_path} 的 {arguments.get('src_sheet', '')}!{arguments.get('src_range', '')} "
+            f"复制到 {arguments.get('dst_sheet', '')}!{arguments.get('dst_cell', '')}"
+        )
+    if tool_name == "delete_range":
+        return (
+            f"删除 {rel_path} 工作表「{arguments.get('sheet_name', '')}」的区域 "
+            f"{arguments.get('range_text', '')}（{arguments.get('shift', 'up')} 补位，不可逆）"
+        )
+    if tool_name == "merge_cells":
+        return f"合并 {rel_path} 工作表「{arguments.get('sheet_name', '')}」的 {arguments.get('range_text', '')}"
+    if tool_name == "unmerge_cells":
+        return f"取消 {rel_path} 工作表「{arguments.get('sheet_name', '')}」{arguments.get('range_text', '')} 的合并"
+    if tool_name == "find_replace":
+        scope = f"工作表「{arguments.get('sheet_name')}」" if arguments.get("sheet_name") else "全部工作表"
+        return f"在 {rel_path} {scope}中把「{arguments.get('query', '')}」替换为「{arguments.get('replacement', '')}」"
+    if tool_name == "manage_sheets":
+        action = str(arguments.get("action", ""))
+        action_cn = {"create": "新建", "rename": "重命名", "copy": "复制", "delete": "删除"}.get(action, action)
+        target = arguments.get("new_name") or arguments.get("sheet_name") or ""
+        return f"{action_cn} {rel_path} 的工作表「{target}」"
     if tool_name == "replace_text":
         return f"在 {rel_path} 中把「{arguments.get('find', '')}」替换为「{arguments.get('replace', '')}」"
     if tool_name == "update_table_cell":
@@ -244,37 +273,63 @@ def _rebase_arguments(
     kind: str,
     start: int,
     count: int,
+    axis: str = "row",
+    affected_sheet: Any = None,
 ) -> tuple[dict[str, Any], bool] | None:
-    """Shift a pending proposal's row coordinates past an applied row change.
+    """Shift a pending proposal's coordinates past an applied row/column change.
 
-    ``kind="delete"`` means ``count`` rows were removed starting at ``start``;
-    ``kind="insert"`` means ``count`` rows were added at ``start``. Returns the
-    updated arguments plus whether anything moved, or None when the proposal's
-    own target no longer exists and it must be discarded rather than relocated.
+    ``kind="delete"`` means ``count`` lines were removed starting at ``start``
+    (rows for ``axis="row"``, columns for ``axis="col"``); ``kind="insert"``
+    means ``count`` lines were added at ``start``. Returns the updated
+    arguments plus whether anything moved, or None when the proposal's own
+    target no longer exists and it must be discarded rather than relocated.
     """
     dead = False
     moved = False
 
-    def row_after(row: int) -> int | None:
+    def line_after(line: int) -> int | None:
         if kind == "delete":
-            if start <= row < start + count:
+            if start <= line < start + count:
                 return None
-            return row - count if row >= start + count else row
-        return row + count if row >= start else row
+            return line - count if line >= start + count else line
+        return line + count if line >= start else line
 
     def shift_coordinate(value: Any) -> Any:
         nonlocal dead, moved
         match = _CELL_RE.match(str(value or "").strip())
         if not match:
             return value
-        row = row_after(int(match.group(2)))
-        if row is None:
-            dead = True
-            return value
-        shifted = f"{match.group(1)}{row}"
+        col_text, row_text = match.group(1), match.group(2)
+        if axis == "row":
+            new = line_after(int(row_text))
+            if new is None:
+                dead = True
+                return value
+            shifted = f"{col_text}{new}"
+        else:
+            from openpyxl.utils import column_index_from_string, get_column_letter
+
+            new = line_after(column_index_from_string(col_text.upper()))
+            if new is None:
+                dead = True
+                return value
+            shifted = f"{get_column_letter(new)}{row_text}"
         if shifted != str(value).strip():
             moved = True
         return shifted
+
+    def shift_range_text(value: Any) -> Any:
+        """Shift both endpoints of an ``"A1:C4"`` range along the active axis."""
+        nonlocal dead, moved
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2:
+            return value  # malformed; a later digest check will catch it
+        left = shift_coordinate(parts[0])
+        right = shift_coordinate(parts[1])
+        if dead:
+            return value
+        return f"{left}:{right}"
 
     def shift_value(value: Any) -> Any:
         nonlocal moved
@@ -282,41 +337,46 @@ def _rebase_arguments(
             # Models sometimes wrap formulas as {"formula": "=A1*2"}; the MCP
             # layer unwraps that at write time, so shift the inner reference.
             shifted = _shift_formula_text(
-                value["formula"], sheet_name=args.get("sheet_name"), kind=kind, start=start, count=count
+                value["formula"], sheet_name=args.get("sheet_name"),
+                kind=kind, start=start, count=count, axis=axis,
             )
             if shifted != value["formula"]:
                 moved = True
             return {**value, "formula": shifted}
         if isinstance(value, str) and value.startswith("="):
             shifted = _shift_formula_text(
-                value, sheet_name=args.get("sheet_name"), kind=kind, start=start, count=count
+                value, sheet_name=args.get("sheet_name"),
+                kind=kind, start=start, count=count, axis=axis,
             )
             if shifted != value:
                 moved = True
             return shifted
         return value
 
-    if tool_name in ("delete_rows", "insert_rows"):
+    if tool_name in ("delete_rows", "insert_rows", "delete_columns", "insert_columns"):
+        # A pending band on the *other* axis carries no start value for this
+        # axis and falls through the int() guard unchanged.
+        band_key = "start_row" if axis == "row" else "start_col"
         try:
-            band_start = int(args.get("start_row"))
+            band_start = int(args.get(band_key))
         except (TypeError, ValueError):
             return args, False
         band_count = int(args.get("count", 1) or 1)
         if kind == "delete":
             if band_start >= start + count:
-                return {**args, "start_row": band_start - count}, True
-            if tool_name == "insert_rows" and band_start >= start:
+                return {**args, band_key: band_start - count}, True
+            if tool_name in ("insert_rows", "insert_columns") and band_start >= start:
                 # The insertion point collapsed into the deleted band; the
                 # closest legal position is the band start itself.
-                return {**args, "start_row": start}, True
+                return {**args, band_key: start}, True
             if band_start + band_count <= start:
                 return args, False
             return None  # the pending band overlaps what was already deleted
         # kind == "insert"
-        if tool_name == "delete_rows" and band_start < start < band_start + band_count:
-            return None  # rows landed inside the pending band; it is no longer contiguous
+        if tool_name in ("delete_rows", "delete_columns") and band_start < start < band_start + band_count:
+            return None  # lines landed inside the pending band; it is no longer contiguous
         if band_start >= start:
-            return {**args, "start_row": band_start + count}, True
+            return {**args, band_key: band_start + count}, True
         return args, False
 
     if tool_name == "update_cells":
@@ -348,7 +408,27 @@ def _rebase_arguments(
             return None
         return {**args, "start_cell": start_cell, "end_cell": end_cell}, moved
 
-    # Word tools carry no spreadsheet row coordinates; nothing to move.
+    if tool_name == "delete_range":
+        range_text = shift_range_text(args.get("range_text"))
+        if dead:
+            return None
+        return {**args, "range_text": range_text}, moved
+
+    if tool_name == "copy_range":
+        # Only the fields on the sheet that actually moved follow the shift.
+        new_args = dict(args)
+        if str(affected_sheet or "") == str(args.get("src_sheet") or ""):
+            new_args["src_range"] = shift_range_text(args.get("src_range"))
+        if str(affected_sheet or "") == str(args.get("dst_sheet") or ""):
+            new_args["dst_cell"] = shift_coordinate(args.get("dst_cell"))
+        if dead:
+            return None
+        return new_args, moved
+
+    # merge_cells/unmerge_cells stay pinned to their recorded coordinates
+    # (openpyxl does not move merged ranges on row/column inserts either);
+    # find_replace and manage_sheets carry no coordinates, and Word tools never
+    # had any. The chained-digest refresh guards them all.
     return args, False
 
 
@@ -414,15 +494,16 @@ async def _plan_rebase(
     None for proposals that must be rejected, and unchanged proposals are left
     out entirely. Network reads happen here; ``_apply_rebase_plan`` persists.
     """
-    if applied.tool_name not in ("delete_rows", "insert_rows"):
+    if applied.tool_name not in ("delete_rows", "insert_rows", "delete_columns", "insert_columns"):
         return []
     applied_args = applied.arguments or {}
+    axis = "col" if applied.tool_name in ("delete_columns", "insert_columns") else "row"
     try:
-        start = int(applied_args.get("start_row"))
+        start = int(applied_args.get("start_row" if axis == "row" else "start_col"))
         count = int(applied_args.get("count", 1) or 1)
     except (TypeError, ValueError):
         return []
-    kind = "delete" if applied.tool_name == "delete_rows" else "insert"
+    kind = "delete" if applied.tool_name.startswith("delete") else "insert"
     sheet_name = applied_args.get("sheet_name")
 
     plan: list[tuple[Operation, dict[str, Any] | None, list[dict[str, Any]] | None]] = []
@@ -430,10 +511,16 @@ async def _plan_rebase(
         if other.id == applied.id or other.rel_path != applied.rel_path:
             continue
         args = other.arguments or {}
-        if args.get("sheet_name") != sheet_name:
+        if other.tool_name == "copy_range":
+            # copy_range addresses a source and a destination sheet instead of
+            # a single sheet_name; it follows the shift when either side moved.
+            if sheet_name not in (args.get("src_sheet"), args.get("dst_sheet")):
+                continue
+        elif args.get("sheet_name") != sheet_name:
             continue
         rebased = _rebase_arguments(
-            other.tool_name, args, kind=kind, start=start, count=count
+            other.tool_name, args, kind=kind, start=start, count=count,
+            axis=axis, affected_sheet=sheet_name,
         )
         if rebased is None:
             plan.append((other, None, None))

@@ -22,7 +22,11 @@ export const useWorkspaceStore = defineStore('workspace', {
     tools: [] as McpTool[],
     turns: [] as ChatTurn[],
     operations: [] as Operation[],
+    /** Suggested followup questions for the last turn (click to send). */
+    followups: [] as string[],
     streaming: false,
+    /** AbortController for the in-flight chat turn; null when idle. */
+    streamController: null as AbortController | null,
     loadingFiles: false,
     health: null as { mcp_started: boolean; tools: number; mcp_error: string | null } | null,
     lastError: null as string | null,
@@ -129,6 +133,8 @@ export const useWorkspaceStore = defineStore('workspace', {
         activities: [],
         proposals: [],
         streaming: false,
+        messageId: message.id,
+        feedback: message.feedback,
       }))
       this.operations = operations
     },
@@ -177,77 +183,128 @@ export const useWorkspaceStore = defineStore('workspace', {
       })
       this.streaming = true
       this.lastError = null
+      this.followups = []
+      const controller = new AbortController()
+      this.streamController = controller
 
       try {
-        await streamChat(workspaceId, message, {
-          onToken: (payload) => {
-            const turn = this.turnById(assistantId)
-            if (turn) turn.content += payload.text
+        await streamChat(
+          workspaceId,
+          message,
+          {
+            onToken: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (turn) turn.content += payload.text
+            },
+            onThinking: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (turn) turn.thinking = (turn.thinking ?? '') + payload.text
+            },
+            onNotice: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (turn) turn.notice = payload.message
+            },
+            onToolCall: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (!turn) return
+              turn.activities.push({
+                id: nextId('activity'),
+                tool: payload.tool,
+                label: payload.label,
+                status: 'running',
+              })
+            },
+            onToolResult: () => {
+              const turn = this.turnById(assistantId)
+              if (!turn) return
+              const running = [...turn.activities]
+                .reverse()
+                .find((activity) => activity.status === 'running')
+              if (running) running.status = 'done'
+            },
+            onProposal: async (payload) => {
+              const operation: Operation = {
+                id: payload.operation_id,
+                tool_name: payload.tool,
+                rel_path: payload.path,
+                summary: payload.summary,
+                status: 'proposed',
+                diff: payload.diff as Operation['diff'],
+                result: null,
+                error: null,
+                backup_path: null,
+                created_at: new Date().toISOString(),
+                resolved_at: null,
+              }
+              const turn = this.turnById(assistantId)
+              if (turn) turn.proposals.push(operation)
+              this.operations = [operation, ...this.operations]
+            },
+            onCitations: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (turn) turn.citations = payload.items as Citation[]
+            },
+            onFollowups: (payload) => {
+              this.followups = payload.items
+            },
+            onDone: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (!turn) return
+              // The streamed tokens already built the message. `done` is authoritative
+              // when it carries text (it is the server's final copy), but an empty one
+              // must not wipe text that already arrived token by token.
+              if (payload.content) turn.content = payload.content
+              // The persisted message id enables thumbs feedback on this turn.
+              if (payload.message_id) turn.messageId = payload.message_id
+            },
+            onError: (payload) => {
+              const turn = this.turnById(assistantId)
+              if (turn) turn.error = payload.message
+            },
           },
-          onToolCall: (payload) => {
-            const turn = this.turnById(assistantId)
-            if (!turn) return
-            turn.activities.push({
-              id: nextId('activity'),
-              tool: payload.tool,
-              label: payload.label,
-              status: 'running',
-            })
-          },
-          onToolResult: () => {
-            const turn = this.turnById(assistantId)
-            if (!turn) return
-            const running = [...turn.activities]
-              .reverse()
-              .find((activity) => activity.status === 'running')
-            if (running) running.status = 'done'
-          },
-          onProposal: async (payload) => {
-            const operation: Operation = {
-              id: payload.operation_id,
-              tool_name: payload.tool,
-              rel_path: payload.path,
-              summary: payload.summary,
-              status: 'proposed',
-              diff: payload.diff as Operation['diff'],
-              result: null,
-              error: null,
-              backup_path: null,
-              created_at: new Date().toISOString(),
-              resolved_at: null,
-            }
-            const turn = this.turnById(assistantId)
-            if (turn) turn.proposals.push(operation)
-            this.operations = [operation, ...this.operations]
-          },
-          onCitations: (payload) => {
-            const turn = this.turnById(assistantId)
-            if (turn) turn.citations = payload.items as Citation[]
-          },
-          onDone: (payload) => {
-            const turn = this.turnById(assistantId)
-            if (!turn) return
-            // The streamed tokens already built the message. `done` is authoritative
-            // when it carries text (it is the server's final copy), but an empty one
-            // must not wipe text that already arrived token by token.
-            if (payload.content) turn.content = payload.content
-          },
-          onError: (payload) => {
-            const turn = this.turnById(assistantId)
-            if (turn) turn.error = payload.message
-          },
-        })
+          controller.signal,
+        )
       } catch (error) {
         const turn = this.turnById(assistantId)
-        const text = error instanceof Error ? error.message : String(error)
-        if (turn) turn.error = text
-        this.lastError = text
+        // 用户点"停止生成"触发的是本地 abort：已生成的部分服务端会落库，
+        // 前端把说明补进当前气泡即可，不能当作错误标红。
+        const aborted = error instanceof DOMException && error.name === 'AbortError'
+        if (aborted) {
+          if (turn && turn.content) {
+            turn.content += '\n\n（已停止生成，以上为已生成的部分。）'
+          }
+        } else {
+          const text = error instanceof Error ? error.message : String(error)
+          if (turn) turn.error = text
+          this.lastError = text
+        }
       } finally {
         const turn = this.turnById(assistantId)
         if (turn) turn.streaming = false
         this.streaming = false
+        this.streamController = null
         // Reload so proposals and the re-indexed file state reflect the server.
         await Promise.all([this.loadFiles(), this.loadOperations()])
+      }
+    },
+
+    /** Abort the in-flight chat turn; the backend keeps whatever already streamed. */
+    stop() {
+      this.streamController?.abort()
+      this.streamController = null
+    },
+
+    /** Thumbs feedback on a persisted assistant turn; clicking again clears it. */
+    async rate(turnId: string, feedback: 'up' | 'down') {
+      const turn = this.turnById(turnId)
+      if (!turn?.messageId || !this.activeWorkspaceId) return
+      const next = turn.feedback === feedback ? 'none' : feedback
+      const previous = turn.feedback ?? null
+      turn.feedback = next === 'none' ? null : next
+      try {
+        await api.setMessageFeedback(this.activeWorkspaceId, turn.messageId, next)
+      } catch {
+        turn.feedback = previous
       }
     },
 

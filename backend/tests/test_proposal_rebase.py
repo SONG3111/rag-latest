@@ -111,10 +111,10 @@ def _pending_args(app, workspace_id: str, operation_id: str) -> dict[str, Any]:
         session.close()
 
 
-def _workbook_on_disk(app, workspace_id: str):
+def _workbook_on_disk(app, workspace_id: str, filename: str = "行操作.xlsx"):
     from app.config import get_settings
 
-    return get_settings().workspace_dir(workspace_id) / "行操作.xlsx"
+    return get_settings().workspace_dir(workspace_id) / filename
 
 
 async def _apply(client: AsyncClient, workspace_id: str, operation_id: str):
@@ -395,3 +395,184 @@ def test_rebase_arguments_arithmetic() -> None:
         start=2,
         count=2,
     ) == ({"table_index": 0, "row": 2, "column": 1, "value": "x"}, False)
+
+
+def test_rebase_arguments_column_arithmetic() -> None:
+    base = {"sheet_name": "订单"}
+
+    # Applied delete_columns(3,1): columns ≥4 shift left 1, column 3 is gone.
+    assert _rebase_arguments(
+        "delete_columns", {**base, "start_col": 5, "count": 1},
+        kind="delete", start=3, count=1, axis="col",
+    ) == ({**base, "start_col": 4, "count": 1}, True)
+    assert (
+        _rebase_arguments(
+            "delete_columns", {**base, "start_col": 3, "count": 1},
+            kind="delete", start=3, count=1, axis="col",
+        )
+        is None
+    )
+    assert _rebase_arguments(
+        "insert_columns", {**base, "start_col": 3},
+        kind="delete", start=3, count=1, axis="col",
+    ) == ({**base, "start_col": 3}, True)
+    # Applied insert_columns(2,2): columns ≥2 shift right 2. A pending row-band
+    # proposal has no start_col, so it stays untouched by a column shift.
+    assert _rebase_arguments(
+        "delete_columns", {**base, "start_col": 3, "count": 1},
+        kind="insert", start=2, count=2, axis="col",
+    ) == ({**base, "start_col": 5, "count": 1}, True)
+    assert _rebase_arguments(
+        "delete_rows", {**base, "start_row": 4, "count": 1},
+        kind="insert", start=2, count=2, axis="col",
+    ) == ({**base, "start_row": 4, "count": 1}, False)
+
+    # Cell coordinates keep their row numbers and follow their column.
+    shifted, moved = _rebase_arguments(
+        "update_cells",
+        {**base, "updates": [{"cell": "D5", "value": 1}, {"cell": "D9", "value": 2}]},
+        kind="delete", start=3, count=1, axis="col",
+    )
+    assert moved and [u["cell"] for u in shifted["updates"]] == ["C5", "C9"]
+
+    # A coordinate inside the deleted column band invalidates the proposal.
+    assert (
+        _rebase_arguments(
+            "update_cells",
+            {**base, "updates": [{"cell": "C5", "value": 1}]},
+            kind="delete", start=3, count=1, axis="col",
+        )
+        is None
+    )
+
+    # A pending formula's references shift along the column axis too: the cell
+    # moves with its column, and a reference into the deleted band dies.
+    shifted, moved = _rebase_arguments(
+        "set_formula",
+        {**base, "cell": "C6", "formula": "=B6*2"},
+        kind="delete", start=2, count=1, axis="col",
+    )
+    assert moved and shifted["cell"] == "B6" and shifted["formula"] == "=#REF!*2"
+    shifted, moved = _rebase_arguments(
+        "set_formula",
+        {**base, "cell": "C6", "formula": "=D6*2"},
+        kind="delete", start=2, count=1, axis="col",
+    )
+    assert moved and shifted["formula"] == "=C6*2"
+
+    shifted, moved = _rebase_arguments(
+        "format_range",
+        {**base, "start_cell": "A6", "end_cell": "B7"},
+        kind="insert", start=2, count=1, axis="col",
+    )
+    assert moved and shifted["start_cell"] == "A6" and shifted["end_cell"] == "C7"
+
+    # delete_range moves both endpoints of its range text.
+    shifted, moved = _rebase_arguments(
+        "delete_range",
+        {**base, "range_text": "C3:C8", "shift": "up"},
+        kind="delete", start=2, count=1, axis="col",
+    )
+    assert moved and shifted["range_text"] == "B3:B8"
+    assert (
+        _rebase_arguments(
+            "delete_range",
+            {**base, "range_text": "C3:C8", "shift": "up"},
+            kind="delete", start=3, count=2, axis="col",
+        )
+        is None
+    )
+
+    # copy_range follows only the side that sits on the affected sheet.
+    shifted, moved = _rebase_arguments(
+        "copy_range",
+        {"src_sheet": "订单", "src_range": "D2:D9", "dst_sheet": "汇总", "dst_cell": "B2"},
+        kind="delete", start=3, count=1, axis="col", affected_sheet="订单",
+    )
+    assert moved and shifted["src_range"] == "C2:C9" and shifted["dst_cell"] == "B2"
+    # A source range inside the deleted column band cannot be relocated.
+    assert (
+        _rebase_arguments(
+            "copy_range",
+            {"src_sheet": "订单", "src_range": "C2:C9", "dst_sheet": "汇总", "dst_cell": "B2"},
+            kind="delete", start=3, count=1, axis="col", affected_sheet="订单",
+        )
+        is None
+    )
+    shifted, moved = _rebase_arguments(
+        "copy_range",
+        {"src_sheet": "其他", "src_range": "C2:C9", "dst_sheet": "汇总", "dst_cell": "D2"},
+        kind="delete", start=3, count=1, axis="col", affected_sheet="订单",
+    )
+    assert not moved and shifted["dst_cell"] == "D2"
+
+    # merge/unmerge stay pinned (openpyxl does not move merged ranges either);
+    # find_replace and manage_sheets carry no coordinates at all.
+    for tool, args in (
+        ("merge_cells", {**base, "range_text": "A1:C1"}),
+        ("unmerge_cells", {**base, "range_text": "A1:C1"}),
+        ("find_replace", {"query": "a", "replacement": "b"}),
+        ("manage_sheets", {"action": "rename", "sheet_name": "a", "new_name": "b"}),
+    ):
+        assert _rebase_arguments(
+            tool, args, kind="delete", start=3, count=1, axis="col", affected_sheet="订单"
+        ) == (args, False)
+
+
+async def test_column_delete_rebases_pending_edits(app_with_temp_storage) -> None:
+    transport = ASGITransport(app=app_with_temp_storage)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app_with_temp_storage.router.lifespan_context(app_with_temp_storage):
+            created = await client.post("/api/workspaces", json={"name": "列删除平移"})
+            workspace_id = created.json()["id"]
+
+            book = Workbook()
+            sheet = book.active
+            sheet.title = "订单"
+            sheet.append(["产品", "区域", "销售额"])
+            sheet.append(["A型", "华东", 1000])
+            buffer = io.BytesIO()
+            book.save(buffer)
+
+            await client.post(
+                f"/api/workspaces/{workspace_id}/files",
+                files=[("files", ("列操作.xlsx", buffer.getvalue(), XLSX_MIME))],
+            )
+            from app.services.operations import create_operation
+
+            session = app_with_temp_storage.state.test_session_factory()
+            try:
+                drop_col = create_operation(
+                    session,
+                    workspace_id,
+                    "delete_columns",
+                    {"path": "列操作.xlsx", "sheet_name": "订单", "start_col": 2, "count": 1},
+                )
+                edit = create_operation(
+                    session,
+                    workspace_id,
+                    "update_cells",
+                    {
+                        "path": "列操作.xlsx",
+                        "sheet_name": "订单",
+                        "updates": [{"cell": "C2", "value": 1500}],
+                    },
+                    diff=[{"cell": "C2", "before": 1000, "after": 1500}],
+                )
+                session.commit()
+            finally:
+                session.close()
+
+            assert (await _apply(client, workspace_id, drop_col.id)).status_code == 200
+
+            # The sales-figure edit followed its column left (C → B).
+            rebased = _pending_args(app_with_temp_storage, workspace_id, edit.id)
+            assert rebased["arguments"]["updates"] == [{"cell": "B2", "value": 1500}]
+            assert "B2" in rebased["summary"]
+
+            assert (await _apply(client, workspace_id, edit.id)).status_code == 200
+            result = load_workbook(
+                _workbook_on_disk(app_with_temp_storage, workspace_id, "列操作.xlsx")
+            )["订单"]
+            assert [result.cell(row=1, column=c).value for c in (1, 2)] == ["产品", "销售额"]
+            assert result["B2"].value == 1500

@@ -124,7 +124,7 @@ LangChain 并不会透出（`additional_kwargs` 为空），无法显示给用�
 | LLM | 百炼 `qwen-plus`（OpenAI 兼容模式） | 改 `LLM_MODEL` 即可换模型 |
 | Embedding | **本地** `BAAI/bge-m3`（1024 维） | 权重在本地，建索引不出网 |
 | Reranker | **本地** `BAAI/bge-reranker-v2-m3` | 交叉编码器，本地推理 |
-| 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 13 个工具 |
+| 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 22 个工具（7 只读 + 15 写入需审批） |
 | 向量库 | Qdrant local（嵌入式） | 每个工作区一个 collection |
 | 关系库 | SQLite | 工作区 / 文件 / 消息 / 操作审计 |
 

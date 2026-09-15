@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { SendOutlined, ToolOutlined } from '@ant-design/icons-vue'
+import {
+  DislikeOutlined,
+  LikeOutlined,
+  SendOutlined,
+  StopOutlined,
+  ToolOutlined,
+} from '@ant-design/icons-vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import MarkdownContent from './MarkdownContent.vue'
 import OperationCard from './OperationCard.vue'
+import ThinkingBlock from './ThinkingBlock.vue'
 
 const store = useWorkspaceStore()
 const draft = ref('')
@@ -142,6 +149,14 @@ async function send(text?: string) {
             </div>
           </div>
 
+          <ThinkingBlock
+            v-if="turn.thinking && turn.role === 'assistant'"
+            :text="turn.thinking"
+            :active="turn.streaming && !turn.content"
+          />
+
+          <div v-if="turn.notice" class="turn-notice">{{ turn.notice }}</div>
+
           <MarkdownContent
             v-if="turn.content && turn.role === 'assistant'"
             class="content"
@@ -149,11 +164,35 @@ async function send(text?: string) {
           />
           <div v-else-if="turn.content" class="content plain" v-text="turn.content" />
 
-          <div v-if="turn.streaming && !turn.content" class="thinking muted">
+          <div v-if="turn.streaming && !turn.content && !turn.thinking" class="thinking muted">
             <a-spin size="small" /> 正在思考…
           </div>
 
           <div v-if="turn.error" class="turn-error">{{ turn.error }}</div>
+
+          <div
+            v-if="turn.role === 'assistant' && turn.messageId && !turn.streaming"
+            class="feedback-row"
+          >
+            <button
+              type="button"
+              class="feedback-btn"
+              :class="{ active: turn.feedback === 'up' }"
+              title="有帮助"
+              @click="store.rate(turn.id, 'up')"
+            >
+              <LikeOutlined />
+            </button>
+            <button
+              type="button"
+              class="feedback-btn"
+              :class="{ active: turn.feedback === 'down' }"
+              title="没帮助"
+              @click="store.rate(turn.id, 'down')"
+            >
+              <DislikeOutlined />
+            </button>
+          </div>
 
           <OperationCard
             v-for="operation in turn.proposals"
@@ -162,6 +201,17 @@ async function send(text?: string) {
           />
         </div>
       </div>
+    </div>
+
+    <div v-if="store.followups.length && !store.streaming" class="followups">
+      <a-tag
+        v-for="question in store.followups"
+        :key="question"
+        class="followup"
+        @click="send(question)"
+      >
+        {{ question }}
+      </a-tag>
     </div>
 
     <div class="composer">
@@ -177,8 +227,17 @@ async function send(text?: string) {
         @press-enter="onPressEnter"
       />
       <a-button
+        v-if="store.streaming"
+        danger
+        @click="store.stop()"
+      >
+        <template #icon><StopOutlined /></template>
+        停止生成
+      </a-button>
+      <a-button
+        v-else
         type="primary"
-        :disabled="!composerText.trim() || store.streaming || !store.activeWorkspaceId"
+        :disabled="!composerText.trim() || !store.activeWorkspaceId"
         @click="send()"
       >
         <template #icon><SendOutlined /></template>
@@ -321,12 +380,71 @@ async function send(text?: string) {
   color: var(--danger);
 }
 
+.turn-notice {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--accent);
+  background: #fff;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
 .composer {
   border-top: 1px solid var(--border);
   padding: 12px 16px;
   display: flex;
   gap: 10px;
   align-items: flex-end;
+}
+
+.followups {
+  padding: 0 16px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+
+.followup {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 4px 12px;
+  white-space: normal;
+}
+
+.followup:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.feedback-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.feedback-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.feedback-btn:hover {
+  background: var(--surface-muted);
+}
+
+.feedback-btn.active {
+  color: var(--accent);
+  background: var(--surface-muted);
 }
 
 .composer :deep(textarea) {

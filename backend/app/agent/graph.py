@@ -16,8 +16,10 @@ reversible without any graph-level state.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import operator
 import re
 from dataclasses import dataclass, field
 from typing import Annotated, Any, AsyncIterator, Literal, Sequence, TypedDict
@@ -32,6 +34,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
+from langgraph.errors import NodeCancelledError
 from langgraph.graph.message import RemoveMessage, add_messages
 from sqlalchemy.orm import Session
 
@@ -53,8 +56,10 @@ from .prompts import (
     EMPTY_ANSWER_NUDGE,
     FRESHNESS_NUDGE,
     KNOWLEDGE_TOOL_DESCRIPTION,
+    MASKED_TOOLS_NOTICE,
     PROPOSAL_NUDGE,
     SYSTEM_PROMPT,
+    history_summary_notice,
     stale_files_notice,
 )
 
@@ -91,8 +96,19 @@ _TOOL_ERROR_HINTS: dict[str | None, str] = {
         "请重新 read_range 获取最新内容，再重新提交提案。"
     ),
     "invalid_range": (
-        "参数越界：行号从 1 开始、count ≥ 1，且不要超出 read_range 返回的 "
+        "参数越界：行号/列号从 1 开始、count ≥ 1，且不要超出 read_range 返回的 "
         "sheet_max_row。请核对后重试。"
+    ),
+    "merge_conflict": (
+        "操作区域与已有的合并单元格重叠。请先用 get_doc_structure 查看 merged_ranges，"
+        "再 unmerge_cells 取消相关合并后重试；或改用 update_cells 逐格修改。"
+    ),
+    "sheet_exists": (
+        "同名工作表已存在。请换一个名称，或先确认是否要在现有工作表上操作。"
+    ),
+    "last_sheet": (
+        "工作簿至少要保留一个工作表，最后一张表不能删除。"
+        "如需清空内容，请用 update_cells 逐格清值。"
     ),
     "calculation_failed": (
         "算式或公式无法计算。工作簿公式必须带 path（和 sheet_name）并用 "
@@ -182,6 +198,10 @@ class AgentState(TypedDict):
     nudges: int
     last_failure: str | None
     failure_repeats: int
+    # Fallback-chain switches ("已切换备用模型") raised by the resilient model
+    # wrapper. add_messages-style accumulation because the agent node runs once
+    # per tool-loop iteration and each may switch models.
+    notices: Annotated[list[str], operator.add]
 
 
 @dataclass
@@ -190,6 +210,11 @@ class AgentEvent:
 
     type: Literal[
         "token",
+        # Reasoning-channel fragments; the frontend folds them into a collapsed
+        # "thinking" section. Never persisted with the answer.
+        "thinking",
+        # User-facing status notices (model fallback switches, timeout notes).
+        "notice",
         "tool_call",
         "tool_result",
         "proposal",
@@ -219,7 +244,11 @@ def _summarize_tool_call(name: str, args: dict[str, Any]) -> str:
         return f"正在读取 {args.get('path', '')} 的表格"
     if name == "find_text":
         return f"正在查找「{args.get('query', args.get('text', ''))}」"
-    if name in {"update_cells", "set_formula", "insert_rows", "delete_rows", "format_range"}:
+    if name in {
+        "update_cells", "set_formula", "insert_rows", "delete_rows", "format_range",
+        "insert_columns", "delete_columns", "copy_range", "delete_range",
+        "merge_cells", "unmerge_cells", "find_replace", "manage_sheets",
+    }:
         return f"准备修改表格：{args.get('path', '')}"
     if name in {"replace_text", "update_table_cell"}:
         return f"准备修改文档：{args.get('path', '')}"
@@ -249,6 +278,13 @@ class WorkspaceAgent:
         # Files that changed since the previous turn, as ``(rel_path, changed_at)``.
         # Empty means the conversation's own earlier answers are still safe to reuse.
         self._stale_files: list[tuple[str, str]] = []
+        # Rolling summary of turns older than the recent window (memory compaction).
+        self._history_summary: str | None = None
+        # Write tools are masked out on lookup-intent turns (intent gate).
+        self._mask_writes: bool = False
+        # Optional run tracer (app.services.tracing.TraceCollector); None disables
+        # all instrumentation, which keeps the graph usable without observability.
+        self._trace = None
 
     # ------------------------------------------------------------------ #
     # tools
@@ -256,10 +292,19 @@ class WorkspaceAgent:
     @property
     def llm(self):
         if self._llm is None:
-            from ..llm.providers import build_chat_model
+            # Resilient wrapper: primary + fallback chain with an in-process
+            # circuit breaker (see app.llm.resilience). Degrades to a single
+            # candidate when no fallback models are configured.
+            from ..llm.providers import build_resilient_chat_model
 
-            self._llm = build_chat_model(self.settings)
+            self._llm = build_resilient_chat_model(self.settings)
         return self._llm
+
+    def _open_span(self, node: str, input_summary: dict[str, Any] | None = None):
+        """Trace span when a collector is installed, else a no-op record dict."""
+        if self._trace is None:
+            return contextlib.nullcontext({"output": {}, "error": None})
+        return self._trace.span(node, input_summary)
 
     def _knowledge_tool(self) -> BaseTool:
         """Wrap retrieval as a tool so the agent decides when to search."""
@@ -270,7 +315,9 @@ class WorkspaceAgent:
 
         def _search(query: str, top_k: int = 5) -> str:
             retriever = Retriever(session, workspace_id, settings)
-            hits = retriever.search(query, top_k=top_k, history=agent._history)
+            hits = retriever.search(
+                query, top_k=top_k, history=agent._history, trace=agent._trace
+            )
             run = retriever.last_run
             meta = {
                 "original_query": run.original_query,
@@ -318,6 +365,11 @@ class WorkspaceAgent:
                 # whatever it is handed, so the approval gate is packed into a
                 # proxy tool that records a proposal and returns the
                 # pending-approval payload without ever touching the file.
+                if self._mask_writes:
+                    # Lookup-intent turn: every write tool is approval-gated, so
+                    # skipping the proxy here is the whole masking step — the
+                    # model only ever sees read-only tools plus retrieval.
+                    continue
                 tools.append(self._gated_write_tool(tool))
                 self._gated_write_names.add(tool.name)
             else:
@@ -462,21 +514,42 @@ class WorkspaceAgent:
                 system_prompts.append(
                     SystemMessage(content=stale_files_notice(self._stale_files))
                 )
+            if self._history_summary:
+                system_prompts.append(
+                    SystemMessage(content=history_summary_notice(self._history_summary))
+                )
+            if self._mask_writes:
+                system_prompts.append(SystemMessage(content=MASKED_TOOLS_NOTICE))
             chunks: list[Any] = []
-            async for chunk in llm_with_tools.astream(
-                [*system_prompts, *state["messages"]]
-            ):
-                chunks.append(chunk)
+            with self._open_span(
+                "agent",
+                {"history_messages": len(state["messages"]), "masked_writes": self._mask_writes},
+            ) as span:
+                async for chunk in llm_with_tools.astream(
+                    [*system_prompts, *state["messages"]]
+                ):
+                    chunks.append(chunk)
             if chunks:
                 response = chunks[0]
                 for chunk in chunks[1:]:
                     response = response + chunk
             else:  # pragma: no cover - a stream always yields at least one chunk
                 response = AIMessage(content="")
-            return {
+            span["output"] = {
+                "text_chars": len(_message_text(getattr(response, "content", None))),
+                "tool_calls": [call.get("name") for call in getattr(response, "tool_calls", []) or []],
+            }
+            update: dict[str, Any] = {
                 "messages": [response],
                 "iterations": state.get("iterations", 0) + 1,
             }
+            # Fallback switches are reported once per completed model call: the
+            # bound wrapper accumulates them, this node forwards and clears them.
+            notices = getattr(llm_with_tools, "notices", None)
+            if notices:
+                update["notices"] = list(notices)
+                notices.clear()
+            return update
 
         async def tools_node(state: AgentState) -> dict[str, Any]:
             # The framework ToolNode validates arguments against each tool's
@@ -485,7 +558,20 @@ class WorkspaceAgent:
             # Everything project-specific — workspace scoping, citations,
             # proposal events, repeat-failure escalation — is post-processing
             # on the messages it returns.
-            update = await self._tool_node.ainvoke(state)
+            last_ai = next(
+                (
+                    message
+                    for message in reversed(list(state["messages"]))
+                    if isinstance(message, AIMessage) and getattr(message, "tool_calls", None)
+                ),
+                None,
+            )
+            with self._open_span(
+                "tools",
+                {"calls": [call.get("name") for call in getattr(last_ai, "tool_calls", []) or []]},
+            ) as span:
+                update = await self._tool_node.ainvoke(state)
+                span["output"] = {"results": len(update.get("messages") or [])}
             messages = list(update.get("messages") or [])
 
             pending = next(
@@ -619,21 +705,22 @@ class WorkspaceAgent:
             else:
                 reason = "empty"
             logger.info("nudging the model (%s)", reason)
-            # Drop the draft so the replacement answer is not a continuation of it —
-            # otherwise the model restates the stale content and the user sees both.
-            messages: list[AnyMessage] = []
-            if isinstance(draft, AIMessage) and getattr(draft, "id", None):
-                messages.append(RemoveMessage(id=draft.id))
-            nudge = {
-                "proposal": PROPOSAL_NUDGE,
-                "stale": FRESHNESS_NUDGE,
-                "empty": EMPTY_ANSWER_NUDGE,
-            }[reason]
-            messages.append(HumanMessage(content=nudge))
-            return {
-                "messages": messages,
-                "nudges": state.get("nudges", 0) + 1,
-            }
+            with self._open_span("nudge", {"reason": reason}):
+                # Drop the draft so the replacement answer is not a continuation of it —
+                # otherwise the model restates the stale content and the user sees both.
+                messages: list[AnyMessage] = []
+                if isinstance(draft, AIMessage) and getattr(draft, "id", None):
+                    messages.append(RemoveMessage(id=draft.id))
+                nudge = {
+                    "proposal": PROPOSAL_NUDGE,
+                    "stale": FRESHNESS_NUDGE,
+                    "empty": EMPTY_ANSWER_NUDGE,
+                }[reason]
+                messages.append(HumanMessage(content=nudge))
+                return {
+                    "messages": messages,
+                    "nudges": state.get("nudges", 0) + 1,
+                }
 
         graph = StateGraph(AgentState)
         graph.add_node("agent", agent_node)
@@ -733,12 +820,53 @@ class WorkspaceAgent:
     # ------------------------------------------------------------------ #
     # execution
     # ------------------------------------------------------------------ #
+    async def astream_direct(
+        self,
+        user_message: str,
+        history: list[BaseMessage] | None = None,
+        *,
+        trace=None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Answer without the agent loop: no tools, no retrieval, no graph.
+
+        Used for chit-chat classified by the intent gate — the measured lesson was
+        that greetings entering the tool loop burned minutes of tool calls for an
+        answer the model already knew. Streams straight from the (resilient) chat
+        model; tool-loop features like citations and proposals do not apply.
+        """
+        self._trace = trace
+        messages: list[AnyMessage] = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            *(history or []),
+            HumanMessage(content=user_message),
+        ]
+        streamed: list[str] = []
+        try:
+            with self._open_span("direct", {"prompt_chars": len(user_message)}) as span:
+                async for chunk in self.llm.astream(messages):
+                    text = _message_text(getattr(chunk, "content", None))
+                    if not text:
+                        continue
+                    streamed.append(text)
+                    yield AgentEvent("token", {"text": text})
+                span["output"] = {"text_chars": len("".join(streamed))}
+        except Exception as exc:
+            logger.exception("direct answer failed")
+            from ..llm.resilience import translate_provider_error
+
+            yield AgentEvent("error", {"message": translate_provider_error(exc)})
+            return
+        yield AgentEvent("done", {"content": "".join(streamed).strip()})
+
     async def astream(
         self,
         user_message: str,
         history: list[BaseMessage] | None = None,
         *,
         stale_files: list[tuple[str, str]] | None = None,
+        history_summary: str | None = None,
+        mask_writes: bool = False,
+        trace=None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one turn, yielding events as they happen."""
         # Snapshot the conversation for query rewriting. The knowledge tool is a plain
@@ -746,6 +874,9 @@ class WorkspaceAgent:
         # here rather than threaded through the tool signature.
         self._history = _render_history(history or [])
         self._stale_files = list(stale_files or [])
+        self._history_summary = (history_summary or "").strip() or None
+        self._mask_writes = mask_writes
+        self._trace = trace
 
         graph = self._build_graph()
         messages: list[AnyMessage] = [*(history or []), HumanMessage(content=user_message)]
@@ -758,6 +889,7 @@ class WorkspaceAgent:
             "nudges": 0,
             "last_failure": None,
             "failure_repeats": 0,
+            "notices": [],
         }
 
         final_text = ""
@@ -775,6 +907,13 @@ class WorkspaceAgent:
                     message_chunk, metadata = chunk
                     if (metadata or {}).get("langgraph_node") != "agent":
                         continue
+                    # Reasoning fragments stream to their own SSE event so the UI
+                    # can show what the model is deliberating; they must never
+                    # count as answer text (an answer that lives only in the
+                    # thinking channel still triggers the empty-answer nudge).
+                    reasoning = _reasoning_text(message_chunk)
+                    if reasoning:
+                        yield AgentEvent("thinking", {"text": reasoning})
                     text = _message_text(getattr(message_chunk, "content", None))
                     if not text:
                         continue
@@ -793,6 +932,8 @@ class WorkspaceAgent:
                         continue
 
                     if node == "agent":
+                        for notice in update.get("notices") or []:
+                            yield AgentEvent("notice", {"message": notice})
                         produced = update.get("messages") or []
                         for message in produced:
                             if not isinstance(message, AIMessage):
@@ -824,9 +965,18 @@ class WorkspaceAgent:
                         citations = update.get("citations") or []
                         if citations:
                             yield AgentEvent("citations", {"items": citations})
+        except NodeCancelledError:
+            # A cancelled node means the turn was aborted (client disconnect or
+            # the turn-level timeout); the SSE layer persists the partial answer,
+            # so the cancellation must not become an error frame here.
+            raise
         except Exception as exc:
             logger.exception("agent run failed")
-            yield AgentEvent("error", {"message": str(exc)})
+            # Provider errors are translated to one actionable sentence here, so
+            # the SSE error frame never carries a raw vendor traceback.
+            from ..llm.resilience import translate_provider_error
+
+            yield AgentEvent("error", {"message": translate_provider_error(exc)})
             return
 
         # The streamed tokens are the authoritative text when the graph produced any;
@@ -844,6 +994,14 @@ _EXCEL_WRITE_TOOLS = {
     "insert_rows",
     "delete_rows",
     "format_range",
+    "insert_columns",
+    "delete_columns",
+    "copy_range",
+    "delete_range",
+    "merge_cells",
+    "unmerge_cells",
+    "find_replace",
+    "manage_sheets",
 }
 
 
@@ -860,6 +1018,46 @@ def _message_text(content: Any) -> str:
                 parts.append(str(block.get("text", "")))
         return "".join(parts)
     return "" if content is None else str(content)
+
+
+# Content-block type names that carry reasoning across the providers/langchain
+# versions this deployment may run: DashScope compatible-mode puts reasoning in
+# ``additional_kwargs["reasoning_content"]``, while OpenAI-shaped providers surface
+# block types like "thinking" (Anthropic-style) or "reasoning".
+_REASONING_BLOCK_TYPES = {"reasoning", "reasoning_content", "thinking"}
+_REASONING_BLOCK_FIELDS = ("thinking", "reasoning_content", "text")
+
+
+def _reasoning_text(message: Any) -> str:
+    """Extract reasoning-channel text from a streamed chunk, or "" if none.
+
+    Deliberately does not consult ``message.content`` strings: only the dedicated
+    reasoning fields qualify, so ordinary text can never leak into the thinking UI.
+    """
+    fragments: list[str] = []
+    additional = getattr(message, "additional_kwargs", None) or {}
+    # Some providers wrap reasoning blocks inside kwargs (e.g. thinking_blocks)
+    # rather than a bare reasoning_content string; catch both shapes.
+    for value in additional.values():
+        if isinstance(value, dict) and value.get("type") in _REASONING_BLOCK_TYPES:
+            fragments.append(_reasoning_fragment_text(value))
+    reasoning_content = additional.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        fragments.append(reasoning_content)
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in _REASONING_BLOCK_TYPES:
+                fragments.append(_reasoning_fragment_text(block))
+    return "".join(fragments)
+
+
+def _reasoning_fragment_text(block: dict[str, Any]) -> str:
+    for field_name in _REASONING_BLOCK_FIELDS:
+        value = block.get(field_name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _render_history(messages: list[BaseMessage], limit: int = 8) -> list[str]:

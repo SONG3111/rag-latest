@@ -46,6 +46,21 @@ class Settings(BaseSettings):
     # workspace the extra deliberation buys little, so it is off by default. Set to
     # true for questions that benefit from multi-step reasoning.
     llm_enable_thinking: bool = Field(default=False)
+    # 备用模型候选，逗号分隔（如 "qwen-flash,qwen-turbo"）。主模型（llm_model）在拿到
+    # 首个流式分片前失败时按序切换；进程内三态熔断器会记住连续失败，冷却期内直接跳过。
+    llm_fallback_models: str = Field(default="")
+    # 连续失败多少次后熔断主模型（在冷却期内跳过，不再先撞一次死模型）。
+    llm_breaker_threshold: int = Field(default=3)
+    # 熔断冷却秒数：冷却结束后放一次探测请求，成功即恢复主模型。
+    llm_breaker_cooldown: float = Field(default=60.0)
+
+    @property
+    def fallback_model_list(self) -> list[str]:
+        return [
+            name.strip()
+            for name in (self.llm_fallback_models or "").split(",")
+            if name.strip()
+        ]
 
     embedding_base_url: str | None = Field(default=None)
     embedding_model: str = Field(default="text-embedding-v3")
@@ -99,6 +114,29 @@ class Settings(BaseSettings):
     # --- agent ---
     agent_max_iterations: int = Field(default=12)
     agent_recursion_limit: int = Field(default=40)
+    # 单轮问答的全局超时（秒）。一次工具循环可能包含多次模型调用（每次各有
+    # llm_request_timeout 的上限），所以全局上限必须明显高于单次请求超时：
+    # 12 次迭代 × 单次 120s 的理论上限不现实，但 120s 的"单轮"预算会被两次
+    # 正常的慢调用击穿，这里取 300s 兜底真正的卡死场景。
+    chat_turn_timeout: float = Field(default=300.0)
+
+    # --- 会话记忆压缩 ---
+    # 组装历史时保留的最近原文条数；更早的轮次滚动压缩成持久摘要。
+    memory_recent_messages: int = Field(default=20)
+    # 压缩触发水位：消息总数超过该值才发起一次摘要（单机用消息数即可，
+    # 不做 token 水位）。摘要用改写小模型，失败自动回退为纯截断。
+    memory_compact_trigger: int = Field(default=40)
+
+    # --- 意图门控 ---
+    # 进 Agent 循环前做一次廉价意图分类（规则优先，模糊时用改写小模型）：
+    # 闲聊直接回答不检索；查询意图只暴露只读工具（写工具遮蔽）；
+    # 判定拿不准或分类失败时保守走完整链路（宁可多检索不可漏检索）。
+    intent_gate_enabled: bool = Field(default=True)
+
+    # --- 推荐后续问题 ---
+    # 回合结束时用改写小模型预测 2~3 个用户最可能的追问，SSE followups 事件
+    # 送达前端以建议 chip 展示；失败即跳过，不影响对话。false 关闭。
+    followups_enabled: bool = Field(default=True)
 
     # --- mcp ---
     mcp_server_command: str | None = Field(default=None)

@@ -61,6 +61,31 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def _no_small_model_calls(monkeypatch: pytest.MonkeyPatch):
+    """Fail fast instead of contacting the small-model channel.
+
+    The intent gate, memory compaction, and followup suggestions share the
+    query-rewrite model channel. Left unpatched, a test message that survives
+    the rules would build a real ChatOpenAI and — with an API key configured —
+    call the provider, which the project rules forbid (AGENTS.md: tests must be
+    mock-only). Each consumer's fail-open fallback (full pipeline / no summary /
+    no suggestions) makes the raised error harmless, so existing tests keep
+    their behavior; the test files that need a scripted small model patch these
+    factories themselves.
+    """
+    import app.agent.intent as intent_module
+    import app.services.followups as followups_module
+    import app.services.memory as memory_module
+
+    def _disabled(settings=None, **kwargs):
+        raise RuntimeError("small-model channel disabled in tests")
+
+    monkeypatch.setattr(intent_module, "build_chat_model", _disabled)
+    monkeypatch.setattr(memory_module, "build_chat_model", _disabled)
+    monkeypatch.setattr(followups_module, "build_chat_model", _disabled)
+
+
 @pytest.fixture()
 def app_with_temp_storage(tmp_path, monkeypatch):
     """The full app with storage, database, and the MCP sandbox in a temp tree.
@@ -115,6 +140,15 @@ def app_with_temp_storage(tmp_path, monkeypatch):
         return real_builder(settings, workspace_root=settings.workspaces_dir)
 
     monkeypatch.setattr(mcp_client, "build_server_params", builder)
+
+    # NOTE: background tasks that open their own session via session_scope
+    # (trace persistence, memory compaction) still target the app's real
+    # database here — which makes them inert no-ops under test. Tests that need
+    # to read back what a background task wrote (see test_run_trace) patch
+    # ``app.api.routes.session_scope`` themselves; patching it globally makes
+    # the reindex-after-write task genuinely contend with request sessions on
+    # the single test SQLite file and trip "database is locked".
+
     app.state.test_session_factory = factory
     yield app
     engine.dispose()

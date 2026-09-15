@@ -5,7 +5,11 @@ Two entry points back one tool:
 * ``safe_arithmetic`` — a plain expression such as ``1200*98 + 128250``. It is
   evaluated through a Python ``ast`` whitelist (no ``eval``), the standard
   pattern in production MCP calculator servers: only numbers, the four basic
-  operations with ``// % **`` and parentheses are accepted.
+  operations with ``// % **`` and parentheses are accepted. Operand and result
+  magnitude guards follow ``safe_power``/``MAX_POWER`` from
+  danthedeckie/simpleeval (MIT), which locks the power operator down "so
+  expressions can't go on for ever" — ``9**9**9`` would otherwise allocate
+  gigabytes before ever producing a number.
 * ``evaluate_workbook_formula`` — an Excel formula such as ``=SUM(B2:D2)``
   evaluated in the context of a real workbook. This follows the approach of
   the established spreadsheet-evaluation libraries (pycel, xlcalculator):
@@ -20,6 +24,7 @@ a temp file that is deleted right after evaluation.
 from __future__ import annotations
 
 import ast
+import math
 import operator
 import tempfile
 from pathlib import Path
@@ -28,7 +33,24 @@ from typing import Any
 from openpyxl.utils import get_column_letter
 
 from .errors import CalculationError
+# The seven Excel error literals pycel can return as cell values. Matching the
+# exact strings matters: an earlier draft compared against stripped keywords
+# ("DIV0") while pycel emits Excel's own "#DIV/0!" form, so the guard never
+# fired and error cells leaked to the agent as literal strings.
 from .excel_ops import _require_sheet, open_workbook
+
+_EXCEL_ERRORS = frozenset({
+    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!",
+})
+
+# Operand cap for `**`, taken from simpleeval's MAX_POWER: any base or
+# exponent larger than this is rejected before computing.
+MAX_POWER = 4_000_000
+
+# A JSON payload has to round-trip through json.dumps, which refuses integers
+# beyond ~4300 digits (int-max-str-digits). Cap the *result* at a comfortable
+# margin below that (2**13000 ≈ 3914 digits).
+MAX_RESULT_BITS = 13_000
 
 # Binary and unary operators the arithmetic evaluator accepts, mapped to their
 # safe stdlib implementations. Anything else in the parse tree is rejected.
@@ -51,7 +73,9 @@ def safe_arithmetic(expression: str) -> Any:
     """Evaluate a plain arithmetic expression without ``eval``.
 
     Accepts numbers, ``+ - * / // % **`` and parentheses; rejects names, calls,
-    strings and anything else the whitelist does not know.
+    strings and anything else the whitelist does not know. Division by zero in
+    any form (``/``, ``//``, ``%``) and non-finite or absurdly large results
+    raise ``CalculationError`` so the tool envelope stays a strict-JSON one.
     """
 
     def visit(node: ast.expr) -> Any:
@@ -63,6 +87,14 @@ def safe_arithmetic(expression: str) -> Any:
             left, right = visit(node.left), visit(node.right)
             if isinstance(node.op, ast.Div) and right == 0:
                 raise CalculationError("division by zero in expression")
+            if isinstance(node.op, (ast.FloorDiv, ast.Mod)) and right == 0:
+                raise CalculationError("division by zero in expression")
+            if isinstance(node.op, ast.Pow) and (
+                abs(left) > MAX_POWER or abs(right) > MAX_POWER
+            ):
+                raise CalculationError(
+                    f"exponent too large ({left} ** {right}); operands are limited to {MAX_POWER}"
+                )
             return _BIN_OPS[type(node.op)](left, right)
         if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
             return _UNARY_OPS[type(node.op)](visit(node.operand))
@@ -78,6 +110,13 @@ def safe_arithmetic(expression: str) -> Any:
     result = visit(tree.body)
     if isinstance(result, complex):
         raise CalculationError("expression produced a complex number")
+    if isinstance(result, float) and not math.isfinite(result):
+        raise CalculationError("expression produced a value too large to represent")
+    if isinstance(result, int) and result.bit_length() > MAX_RESULT_BITS:
+        raise CalculationError(
+            "expression produced a number too large to return; "
+            f"results are limited to {MAX_RESULT_BITS} bits"
+        )
     return result
 
 
@@ -122,11 +161,10 @@ def evaluate_workbook_formula(
 
 def _plain_value(result: Any) -> Any:
     """Coerce an engine result into something JSON- and error-friendly."""
-    text = str(result)
-    if text.startswith("#") and text.rstrip("!").upper() in {
-        "DIV0", "NA", "NAME", "NULL", "NUM", "REF", "VALUE"
-    }:
-        raise CalculationError(f"formula evaluated to the Excel error {text}")
+    if isinstance(result, str) and result.strip().upper() in _EXCEL_ERRORS:
+        raise CalculationError(f"formula evaluated to the Excel error {result.strip()}")
+    if isinstance(result, float) and not math.isfinite(result):
+        raise CalculationError("formula produced a value too large to represent")
     if hasattr(result, "item"):  # numpy scalars
         return result.item()
     return result

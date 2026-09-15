@@ -1,10 +1,38 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { DeleteOutlined, SafetyCertificateOutlined, ToolOutlined } from '@ant-design/icons-vue'
+import { computed, ref } from 'vue'
+import { DeleteOutlined, EyeOutlined, SafetyCertificateOutlined, ToolOutlined } from '@ant-design/icons-vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { api } from '@/api'
+import type { Citation, CitationPreview } from '@/types'
 import OperationCard from './OperationCard.vue'
+import CitationPreviewModal from './CitationPreviewModal.vue'
 
 const store = useWorkspaceStore()
+
+// 引用点击预览：按 citation 的 file + location 实时读一次原文窗口。
+const previewOpen = ref(false)
+const previewLoading = ref(false)
+const previewData = ref<CitationPreview | null>(null)
+const previewError = ref<string | null>(null)
+
+async function openPreview(citation: Citation) {
+  if (!store.activeWorkspaceId || !citation.file || !citation.location) return
+  previewOpen.value = true
+  previewLoading.value = true
+  previewError.value = null
+  previewData.value = null
+  try {
+    previewData.value = await api.previewCitation(
+      store.activeWorkspaceId,
+      citation.file,
+      citation.location,
+    )
+  } catch (error) {
+    previewError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    previewLoading.value = false
+  }
+}
 
 // 失败的提案也留在待确认面板：失败多为瞬时原因（文件被占用、校验冲突），
 // 排除后用户可以直接点「重试」。
@@ -83,17 +111,28 @@ function scoreBand(score: number): string {
             </div>
             <div class="citation-location muted">{{ citation.location }}</div>
             <div class="citation-snippet">{{ citation.snippet }}</div>
-            <div v-if="citation.score !== null && citation.score !== undefined" class="citation-score">
-              <span
-                class="score-badge"
-                :class="citation.score_source === 'rerank' ? scoreBand(citation.score) : 'ordinal'"
+            <div class="citation-score">
+              <template v-if="citation.score !== null && citation.score !== undefined">
+                <span
+                  class="score-badge"
+                  :class="citation.score_source === 'rerank' ? scoreBand(citation.score) : 'ordinal'"
+                >
+                  {{ citation.score_source === 'rerank' ? '相关性' : '排序分' }}
+                  {{ citation.score.toFixed(3) }}
+                </span>
+                <span v-if="citation.score_source === 'rerank' && citation.score < 0.15" class="muted">
+                  低于阈值，仅供参考
+                </span>
+              </template>
+              <a-button
+                v-if="citation.file && citation.location"
+                type="link"
+                size="small"
+                class="preview-button"
+                @click="openPreview(citation)"
               >
-                {{ citation.score_source === 'rerank' ? '相关性' : '排序分' }}
-                {{ citation.score.toFixed(3) }}
-              </span>
-              <span v-if="citation.score_source === 'rerank' && citation.score < 0.15" class="muted">
-                低于阈值，仅供参考
-              </span>
+                <EyeOutlined /> 查看原文
+              </a-button>
             </div>
           </div>
         </div>
@@ -124,6 +163,14 @@ function scoreBand(score: number): string {
         </div>
       </a-tab-pane>
     </a-tabs>
+
+    <CitationPreviewModal
+      :open="previewOpen"
+      :loading="previewLoading"
+      :preview="previewData"
+      :error="previewError"
+      @close="previewOpen = false"
+    />
   </aside>
 </template>
 
@@ -240,6 +287,13 @@ function scoreBand(score: number): string {
 .score-badge.ordinal {
   background: var(--surface-muted);
   color: var(--text-muted);
+}
+
+.preview-button {
+  margin-left: auto;
+  padding-left: 0;
+  padding-right: 0;
+  font-size: 11px;
 }
 
 .tool-row {

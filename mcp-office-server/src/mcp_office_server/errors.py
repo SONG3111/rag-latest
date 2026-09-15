@@ -74,6 +74,36 @@ class CalculationError(ToolError):
     code = "calculation_failed"
 
 
+class MergeConflict(ToolError):
+    """Raised when a range operation would cross existing merged cells."""
+
+    code = "merge_conflict"
+
+
+class SheetExists(ToolError):
+    """Raised when creating or renaming a sheet to a name already in use."""
+
+    code = "sheet_exists"
+
+
+class LastSheetError(ToolError):
+    """Raised when deleting the only sheet left in a workbook."""
+
+    code = "last_sheet"
+
+
+class InvalidValue(ToolError):
+    """Raised when a cell value cannot be stored in an Excel cell."""
+
+    code = "invalid_value"
+
+
+class InvalidSheetName(ToolError):
+    """Raised for sheet names Excel itself would reject."""
+
+    code = "invalid_sheet_name"
+
+
 def error_payload(exc: ToolError) -> dict:
     """Serialize a ToolError into the standard tool response envelope."""
     return {

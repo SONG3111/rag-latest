@@ -109,13 +109,15 @@ async def _stream_turn(
 
 @pytest.fixture()
 def scripted_model(monkeypatch: pytest.MonkeyPatch):
-    """Route the agent's lazy ``build_chat_model`` to a scripted replay."""
+    """Route the agent's lazy model factory to a scripted replay."""
 
     def _install(script: list[AIMessage]) -> ScriptedLLM:
         from app.llm import providers
 
         model = ScriptedLLM(script)
-        monkeypatch.setattr(providers, "build_chat_model", lambda settings: model)
+        monkeypatch.setattr(
+            providers, "build_resilient_chat_model", lambda settings: model
+        )
         return model
 
     return _install
@@ -251,7 +253,7 @@ async def test_provider_failure_yields_an_error_frame_and_a_placeholder_turn(
     from app.llm import providers
 
     monkeypatch.setattr(
-        providers, "build_chat_model", lambda settings: ExplodingLLM([])
+        providers, "build_resilient_chat_model", lambda settings: ExplodingLLM([])
     )
 
     transport = ASGITransport(app=app_with_temp_storage)

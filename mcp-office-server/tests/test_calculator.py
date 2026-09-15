@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from mcp_office_server import server
 from mcp_office_server.calculator import evaluate_workbook_formula, safe_arithmetic
@@ -42,6 +43,37 @@ def test_arithmetic_rejects_non_numbers() -> None:
         safe_arithmetic("")
 
 
+def test_arithmetic_rejects_every_division_form_by_zero() -> None:
+    """Regression: only true division was guarded; // and % raised ZeroDivisionError raw."""
+    with pytest.raises(CalculationError):
+        safe_arithmetic("5//0")
+    with pytest.raises(CalculationError):
+        safe_arithmetic("5%0")
+    assert safe_arithmetic("5//2") == 2
+    assert safe_arithmetic("5%2") == 1
+
+
+def test_arithmetic_caps_power_operands() -> None:
+    """Regression: 10**10**7 built a 10-million-digit int; 9**9**9 would take GBs.
+
+    Guard pattern from simpleeval's safe_power/MAX_POWER (MIT).
+    """
+    with pytest.raises(CalculationError, match="exponent too large"):
+        safe_arithmetic("10**10**7")
+    with pytest.raises(CalculationError, match="exponent too large"):
+        safe_arithmetic("9**9**9")
+    assert safe_arithmetic("2**10") == 1024
+
+
+def test_arithmetic_rejects_non_finite_results() -> None:
+    """Regression: 1e400*2 returned Infinity — not valid strict JSON for clients."""
+    with pytest.raises(CalculationError):
+        safe_arithmetic("1e400*2")
+    payload = _invoke("1e400*2")
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "calculation_failed"
+
+
 # --------------------------------------------------------------------------- #
 # workbook mode
 # --------------------------------------------------------------------------- #
@@ -63,6 +95,27 @@ def test_workbook_formula_without_leading_equals(workbook_path: Path) -> None:
 def test_workbook_formula_reports_excel_errors(workbook_path: Path) -> None:
     with pytest.raises(CalculationError):
         evaluate_workbook_formula(workbook_path, "销售", "=NOTAFUNCTION(C2)")
+
+
+def test_workbook_formula_reports_division_by_zero_as_excel_error(
+    workbook_path: Path,
+) -> None:
+    """Regression: pycel returns #DIV/0! as a *cell value*, not an exception.
+
+    The error-value guard compared against stripped keywords ("DIV0") while
+    pycel emits Excel's literal "#DIV/0!", so the guard never fired and the
+    error string leaked to the agent as a normal result.
+    """
+    path = workbook_path.parent / "除零.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "销售"
+    sheet["C2"] = 1000
+    sheet["D2"] = "=C2/0"
+    book.save(path)
+
+    with pytest.raises(CalculationError, match="#DIV/0!"):
+        evaluate_workbook_formula(path, "销售", "=D2")
 
 
 def test_workbook_mode_never_touches_the_file(workbook_path: Path) -> None:

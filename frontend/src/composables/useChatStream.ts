@@ -11,6 +11,10 @@ import { drainSseEvents } from './sse'
 
 export interface StreamHandlers {
   onToken?: (payload: { text: string }) => void
+  /** Reasoning-channel fragments; rendered in a collapsible "thinking" section. */
+  onThinking?: (payload: { text: string }) => void
+  /** Status notices from the backend (model fallback, turn timeout). */
+  onNotice?: (payload: { message: string }) => void
   onToolCall?: (payload: { tool: string; args: Record<string, unknown>; label: string }) => void
   onToolResult?: (payload: { tool_call_id: string; content: string }) => void
   onProposal?: (payload: {
@@ -21,7 +25,9 @@ export interface StreamHandlers {
     diff: unknown[]
   }) => void
   onCitations?: (payload: { items: unknown[] }) => void
-  onDone?: (payload: { content: string }) => void
+  /** Post-turn suggested questions; rendered as clickable chips. */
+  onFollowups?: (payload: { items: string[] }) => void
+  onDone?: (payload: { content: string; run_id?: string; message_id?: string }) => void
   onError?: (payload: { message: string }) => void
 }
 
@@ -74,6 +80,12 @@ function dispatch(event: string, data: any, handlers: StreamHandlers): void {
     case 'token':
       handlers.onToken?.(data)
       break
+    case 'thinking':
+      handlers.onThinking?.(data)
+      break
+    case 'notice':
+      handlers.onNotice?.(data)
+      break
     case 'tool_call':
       handlers.onToolCall?.(data)
       break
@@ -85,6 +97,9 @@ function dispatch(event: string, data: any, handlers: StreamHandlers): void {
       break
     case 'citations':
       handlers.onCitations?.(data)
+      break
+    case 'followups':
+      handlers.onFollowups?.(data)
       break
     case 'done':
       handlers.onDone?.(data)
