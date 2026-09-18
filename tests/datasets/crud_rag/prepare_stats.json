@@ -1,0 +1,9 @@
+{
+  "qa_sampled": 100,
+  "corpus_docs": 3000,
+  "corpus_chunks": 3773,
+  "evidence_queries": 86,
+  "excluded_paraphrase": 14,
+  "answer_split_broken": 0,
+  "lcs_min": 10
+}

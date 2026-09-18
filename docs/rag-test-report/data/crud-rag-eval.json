@@ -1,0 +1,327 @@
+{
+  "dataset": {
+    "name": "CRUD-RAG (Read / single-hop QA subset)",
+    "source": "IAAR-Shanghai CRUD-RAG, arXiv:2401.17043",
+    "docs": 3000,
+    "queries": 86,
+    "preparation": "tests/datasets/crud_rag/prepare_stats.json"
+  },
+  "embedding": {
+    "provider": "local",
+    "model": "bge-m3 (local)"
+  },
+  "reranker": "local",
+  "top_k": 10,
+  "sweep": [
+    {
+      "size": 128,
+      "overlap": 64,
+      "children": 28998,
+      "parents": 3000,
+      "build_seconds": 52.7,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9922,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9922,
+          "failures": []
+        }
+      }
+    },
+    {
+      "size": 256,
+      "overlap": 64,
+      "children": 11263,
+      "parents": 3000,
+      "build_seconds": 47.5,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9942,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9922,
+          "failures": []
+        }
+      }
+    },
+    {
+      "size": 512,
+      "overlap": 64,
+      "children": 5587,
+      "parents": 3000,
+      "build_seconds": 45.3,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "rerank": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9942,
+          "failures": []
+        }
+      }
+    },
+    {
+      "size": 1024,
+      "overlap": 64,
+      "children": 3549,
+      "parents": 3000,
+      "build_seconds": 412.8,
+      "modes": {
+        "bm25": {
+          "hit@1": 1.0,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 1.0,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9942,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9942,
+          "failures": []
+        }
+      }
+    }
+  ],
+  "rrf_weight_sweep": [
+    {
+      "label": "prod-1.0-0.8",
+      "dense_weight": 1.0,
+      "bm25_weight": 0.8,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        }
+      }
+    },
+    {
+      "label": "equal-1.0-1.0",
+      "dense_weight": 1.0,
+      "bm25_weight": 1.0,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        }
+      }
+    },
+    {
+      "label": "dense-heavy-1.2-0.8",
+      "dense_weight": 1.2,
+      "bm25_weight": 0.8,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        }
+      }
+    },
+    {
+      "label": "sparse-heavy-0.8-1.0",
+      "dense_weight": 0.8,
+      "bm25_weight": 1.0,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        }
+      }
+    }
+  ],
+  "candidates_sweep": [
+    {
+      "candidates": 50,
+      "modes": {
+        "bm25": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "dense": {
+          "hit@1": 0.9767,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9855,
+          "failures": []
+        },
+        "hybrid": {
+          "hit@1": 0.9884,
+          "hit@3": 0.9884,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9913,
+          "failures": []
+        },
+        "rerank": {
+          "hit@1": 0.9884,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "hit@10": 1.0,
+          "mrr@10": 0.9942,
+          "failures": []
+        }
+      }
+    }
+  ],
+  "equivalence": {
+    "checked": 10,
+    "mismatches": 0,
+    "detail": []
+  }
+}

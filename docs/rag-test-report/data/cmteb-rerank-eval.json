@@ -1,0 +1,45 @@
+{
+  "dataset": {
+    "name": "C-MTEB T2Reranking (dev, official candidate pools)",
+    "source": "T2Ranking, arXiv:2304.03679; pools rebuilt from the official dev parquet",
+    "queries": 500,
+    "passages": 8208,
+    "pool_size": {
+      "min": 1,
+      "p50": 15,
+      "max": 78
+    }
+  },
+  "rerank_leg_queries": 500,
+  "results": {
+    "bm25": {
+      "map": 0.6497,
+      "ndcg@10": 0.7065,
+      "mrr@10": 0.7582,
+      "recall@10": 0.7736
+    },
+    "dense": {
+      "map": 0.6705,
+      "ndcg@10": 0.7302,
+      "mrr@10": 0.7697,
+      "recall@10": 0.7896
+    },
+    "rrf": {
+      "map": 0.6698,
+      "ndcg@10": 0.7313,
+      "mrr@10": 0.7756,
+      "recall@10": 0.7949
+    },
+    "rerank": {
+      "map": 0.6758,
+      "ndcg@10": 0.7338,
+      "mrr@10": 0.7784,
+      "recall@10": 0.7875
+    }
+  },
+  "generation_recall_top30": {
+    "bm25@30": 0.9937,
+    "dense@30": 0.9945,
+    "union@30": 0.9965
+  }
+}

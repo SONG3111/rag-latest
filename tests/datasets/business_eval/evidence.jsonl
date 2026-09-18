@@ -1,0 +1,30 @@
+{"query_id": "biz-001", "query": "在线教育平台的核心接口响应时间目标是多少", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#4"]}
+{"query_id": "biz-002", "query": "在线教育推荐不准的成因是什么", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#3"]}
+{"query_id": "biz-003", "query": "课程推荐遇到新用户冷启动怎么办", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#14", "doc_281c8cd365ae_online_education_chapter_test.txt#15"]}
+{"query_id": "biz-004", "query": "编程题的评分规则是什么", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#37", "doc_281c8cd365ae_online_education_chapter_test.txt#38"]}
+{"query_id": "biz-005", "query": "错题本的周复习计划怎么安排重做间隔", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#42"]}
+{"query_id": "biz-006", "query": "课程退款规则是怎样的", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#45", "doc_281c8cd365ae_online_education_chapter_test.txt#46"]}
+{"query_id": "biz-007", "query": "优惠券有哪些类型,能否叠加使用", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#47"]}
+{"query_id": "biz-008", "query": "协同过滤召回是怎么工作的", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#10"]}
+{"query_id": "biz-009", "query": "健康检查接口返回哪几项信息", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#52"]}
+{"query_id": "biz-010", "query": "平台初期覆盖哪些课程品类", "relevant_chunks": ["doc_281c8cd365ae_online_education_chapter_test.txt#6"]}
+{"query_id": "biz-011", "query": "电子病历评级五级要求实现什么", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#3"]}
+{"query_id": "biz-012", "query": "电子病历评级多久开展一次,医院要提前多久准备", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#5"]}
+{"query_id": "biz-013", "query": "平台对患者敏感数据如何加密存储", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#22"]}
+{"query_id": "biz-014", "query": "系统的权限模型是怎么设计的", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#23"]}
+{"query_id": "biz-015", "query": "热门号源抢号如何防止数据库瞬时压力", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#14"]}
+{"query_id": "biz-016", "query": "候补队列的有效期是多久", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#15"]}
+{"query_id": "biz-017", "query": "电子处方有效期几天", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#17"]}
+{"query_id": "biz-018", "query": "智能导诊在常见病场景下的准确率是多少", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#27"]}
+{"query_id": "biz-019", "query": "熔断机制的触发条件是什么", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#10"]}
+{"query_id": "biz-020", "query": "图文问诊医生需要在多长时间内回复", "relevant_chunks": ["doc_324f910e5c27_smart_medical_full_test.txt#16"]}
+{"query_id": "biz-021", "query": "行程规划的响应时间目标是多少秒", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#1"]}
+{"query_id": "biz-022", "query": "景点间距离用什么公式计算", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#3"]}
+{"query_id": "biz-023", "query": "西湖的评分和门票价格是多少", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#4"]}
+{"query_id": "biz-024", "query": "向量库和编排框架最终选型是什么", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#5"]}
+{"query_id": "biz-025", "query": "行程规划接口的限流和超时设置是多少", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#6"]}
+{"query_id": "biz-026", "query": "TTFT 指的是什么", "relevant_chunks": ["doc_a8248b7551f9_travel_agent_test.txt#8", "doc_a8248b7551f9_travel_agent_test.txt#9"]}
+{"query_id": "biz-027", "query": "密码设置有什么复杂度要求", "relevant_chunks": ["doc_c1a38b02d69b_deep_level_paragraphs_test.txt#1"]}
+{"query_id": "biz-028", "query": "内容复审评分低于多少会退回修改", "relevant_chunks": ["doc_c1a38b02d69b_deep_level_paragraphs_test.txt#2"]}
+{"query_id": "biz-029", "query": "创作者累计扣满多少分会封禁账号", "relevant_chunks": ["doc_c1a38b02d69b_deep_level_paragraphs_test.txt#2"]}
+{"query_id": "biz-030", "query": "画像标签分为哪三类", "relevant_chunks": ["doc_c1a38b02d69b_deep_level_paragraphs_test.txt#3"]}

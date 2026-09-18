@@ -36,3 +36,14 @@ docs/*
 
 # --- regenerable manual test data (scripts/make_manual_test_files.py) ---
 testdata/
+
+# --- eval datasets: labels & pools are committed, raw corpora are not ---
+tests/datasets/crud_rag/docs/
+tests/datasets/cmteb_reranking/corpus.jsonl
+tests/datasets/cmteb_reranking/_raw/
+
+# --- allow report data JSONs under docs (global data/ rule above would hide them) ---
+!docs/rag-test-report/data/
+!docs/rag-test-report/data/**
+!docs/rag-test-report/9-18/data/
+!docs/rag-test-report/9-18/data/**
