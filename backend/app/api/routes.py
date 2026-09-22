@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..agent.graph import AgentEvent, WorkspaceAgent
 from ..agent.intent import classify_intent
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..db import get_session, session_scope
 from ..llm.resilience import translate_provider_error
 from ..models import (
@@ -35,7 +35,8 @@ from ..services.files import (
     save_upload,
 )
 from ..services.followups import generate_followups
-from ..services.memory import compact_memory, load_summary
+from ..services.memory import compact_memory, load_summary, uncovered_count
+from ..services.token_budget import estimate_tokens
 from ..services.tracing import TraceCollector, list_runs, persist_traces, run_detail
 from ..services.operations import (
     OperationError,
@@ -393,6 +394,10 @@ async def chat_stream(
     settings = get_settings()
 
     history_rows = _recent_messages(session, workspace_id, HISTORY_MESSAGE_LIMIT)
+    # Drop the rows the rolling summary already carries. The bookmark counts
+    # from the oldest row, so the tail needs the table total (computed before
+    # the new user message joins the session, keeping the arithmetic exact).
+    history_rows = history_rows[max(0, len(history_rows) - uncovered_count(session, workspace_id)) :]
 
     user_message = Message(
         workspace_id=workspace_id,
@@ -403,9 +408,9 @@ async def chat_stream(
     session.flush()
 
     agent = WorkspaceAgent(session, workspace, client)
-    history = _to_langchain_history(history_rows)
-    stale_files = _files_changed_since_last_turn(session, workspace_id, history_rows)
     history_summary = load_summary(session, workspace_id)
+    history = _to_langchain_history(history_rows, settings, history_summary)
+    stale_files = _files_changed_since_last_turn(session, workspace_id, history_rows)
     # One run per chat turn: the collector buffers node records in memory and a
     # background task writes them after the response, so tracing is fail-open.
     trace = TraceCollector(workspace_id)
@@ -657,12 +662,22 @@ def set_message_feedback(
     return message
 
 
-def _to_langchain_history(rows: list[Message]) -> list:
+def _to_langchain_history(
+    rows: list[Message], settings: Settings, summary: str | None = None
+) -> list:
     """Rebuild the conversational context passed to the graph.
 
     Only user and assistant text turns are replayed. Tool messages are not persisted,
     so the history never contains a tool call without its matching tool result, which
     would make the provider reject the request.
+
+    Two caps bound what enters the model (pi-mono compaction's window arithmetic):
+    the ``memory_recent_messages`` count cap, then a backward token walk within
+    ``memory_keep_recent_tokens`` minus what the summary already spends of the
+    total budget — a fat summary shrinks the verbatim tail, not the other way
+    round. Rows dropped by the token cap are covered by neither summary nor
+    window this turn; the background compaction folds them, so later turns
+    carry them via the summary again.
     """
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -675,7 +690,21 @@ def _to_langchain_history(rows: list[Message]) -> list:
             history.append(HumanMessage(content=content))
         elif row.role is MessageRole.assistant:
             history.append(AIMessage(content=content))
-    return history[-20:]
+    history = history[-settings.memory_recent_messages :]
+
+    budget = settings.memory_keep_recent_tokens
+    if summary:
+        budget = min(budget, settings.memory_context_token_budget - estimate_tokens(summary))
+    kept: list = []
+    total = 0
+    for message in reversed(history):
+        cost = estimate_tokens(str(message.content))
+        if kept and total + cost > budget:
+            break
+        total += cost
+        kept.append(message)
+    kept.reverse()
+    return kept
 
 
 def _files_changed_since_last_turn(

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
 from app.models import ConversationSummary, Message, MessageRole, Workspace
 from app.services.memory import compact_memory, load_summary
@@ -148,6 +148,94 @@ def test_long_messages_are_truncated_in_the_prompt(temp_session, workspace_id):
 
 
 # --------------------------------------------------------------------------- #
+# Token-budgeted trigger and keep boundary (pi-mono compaction / dsh compaction-basic)
+# --------------------------------------------------------------------------- #
+def _seed_fat_messages(session, workspace_id: str, turns: int, fat_chars: int = 1500) -> None:
+    """Turns whose content alone is worth ~``fat_chars`` tokens (han text)."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(turns):
+        session.add(
+            Message(
+                workspace_id=workspace_id,
+                role=MessageRole.user if index % 2 == 0 else MessageRole.assistant,
+                content="数" * fat_chars,
+                created_at=base + timedelta(minutes=index),
+            )
+        )
+    session.flush()
+
+
+def test_fat_messages_trigger_token_pressure_below_the_count_gate(temp_session, workspace_id):
+    """25 fat turns never reach the 40-row watermark, but 20 of them in the window
+    alone cost ~30k estimated tokens — pressure must fold them without the gate."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    _seed_fat_messages(temp_session, workspace_id, turns=25)
+    prompts: list[str] = []
+
+    assert compact_memory(
+        temp_session,
+        workspace_id,
+        settings,
+        summarizer=lambda prompt: prompts.append(prompt) or "摘要",
+    ) is True
+
+    # The keep boundary: 5 × 1500 = 7500 ≤ keep_recent_tokens(8000), a 6th
+    # message would exceed it, so exactly 5 newest rows stay verbatim.
+    row = temp_session.get(ConversationSummary, workspace_id)
+    assert row.covered_count == 25 - 5
+    assert prompts[0].count("数" * 100) >= 1  # folded fat content is in the prompt
+
+
+def test_force_compaction_folds_deeper_than_the_normal_path(temp_session, workspace_id):
+    """force=True (context-overflow recovery) halves the keep budget, so the same
+    history folds more rows than the normal path would."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    _seed_fat_messages(temp_session, workspace_id, turns=25)
+    calls: list[str] = []
+
+    def summarizer(prompt: str) -> str:
+        calls.append(prompt)
+        return "摘要"
+
+    assert compact_memory(temp_session, workspace_id, settings, summarizer=summarizer) is True
+    assert temp_session.get(ConversationSummary, workspace_id).covered_count == 20
+
+    # Forced re-run: 2 × 1500 = 3000 ≤ 4000 (halved budget), a 3rd would exceed.
+    assert compact_memory(
+        temp_session, workspace_id, settings, summarizer=summarizer, force=True
+    ) is True
+    assert temp_session.get(ConversationSummary, workspace_id).covered_count == 23
+    assert len(calls) == 2
+
+    # No new material beyond the bookmark: even force must not re-summarize.
+    assert compact_memory(
+        temp_session, workspace_id, settings, summarizer=summarizer, force=True
+    ) is False
+    assert len(calls) == 2
+
+
+def test_uncovered_count_measures_the_tail_beyond_the_bookmark(temp_session, workspace_id):
+    """``covered_count`` counts from the oldest row; uncovered = total - covered."""
+    from app.services.memory import uncovered_count
+
+    _seed_messages(temp_session, workspace_id, turns=30)
+    assert uncovered_count(temp_session, workspace_id) == 30
+
+    temp_session.add(ConversationSummary(workspace_id=workspace_id, summary="摘", covered_count=20))
+    temp_session.flush()
+    assert uncovered_count(temp_session, workspace_id) == 10
+
+    # A bookmark beyond the table (compaction raced a deletion) never goes negative.
+    temp_session.get(ConversationSummary, workspace_id).covered_count = 50
+    temp_session.flush()
+    assert uncovered_count(temp_session, workspace_id) == 0
+
+
+# --------------------------------------------------------------------------- #
 # SSE-level: a stored summary reaches the model as background context
 # --------------------------------------------------------------------------- #
 class ScriptedLLM:
@@ -219,3 +307,51 @@ async def test_stored_summary_is_injected_as_background_context(
                 if isinstance(message, SystemMessage)
             ]
             assert any("对话背景摘要" in text and "5000 元" in text for text in system_texts)
+
+
+async def test_history_slicing_skips_rows_covered_by_the_summary(
+    app_with_temp_storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bookmark decides where the replayed history starts: rows the summary
+    covers are not also sent verbatim (pi's firstKeptEntryId arithmetic)."""
+    from app.llm import providers
+
+    scripted = ScriptedLLM([AIMessage(content="好的。")])
+    monkeypatch.setattr(
+        providers, "build_resilient_chat_model", lambda settings: scripted
+    )
+
+    app = app_with_temp_storage
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            workspace_id = (await client.post("/api/workspaces", json={"name": "书签切片"})).json()["id"]
+            session = app.state.test_session_factory()
+            _seed_messages(session, workspace_id, turns=30)
+            session.add(
+                ConversationSummary(
+                    workspace_id=workspace_id,
+                    summary="早期讨论过费用报销：单笔上限 5000 元。",
+                    covered_count=20,
+                )
+            )
+            session.commit()
+
+            response = await client.post(
+                f"/api/workspaces/{workspace_id}/chat/stream",
+                json={"message": "上限是多少来着？"},
+            )
+            frames = parse_sse_frames(response.text)
+            next(payload for name, payload in frames if name == "done")
+
+            conversation = [
+                message
+                for message in scripted.inputs[0]
+                if isinstance(message, (HumanMessage, AIMessage))
+            ]
+            # 30 seeded rows, 20 covered -> 第20..29轮 replay (10) + the new turn.
+            assert len(conversation) == 11
+            contents = [str(message.content) for message in conversation]
+            assert contents[0] == "第20轮消息"
+            assert contents[9] == "第29轮消息"
+            assert contents[10] == "上限是多少来着？"

@@ -125,11 +125,24 @@ class Settings(BaseSettings):
     chat_turn_timeout: float = Field(default=300.0)
 
     # --- 会话记忆压缩 ---
-    # 组装历史时保留的最近原文条数；更早的轮次滚动压缩成持久摘要。
+    # 组装历史时保留的最近原文条数上限（硬上限）；更早的轮次滚动压缩成持久摘要。
     memory_recent_messages: int = Field(default=20)
-    # 压缩触发水位：消息总数超过该值才发起一次摘要（单机用消息数即可，
-    # 不做 token 水位）。摘要用改写小模型，失败自动回退为纯截断。
+    # 近窗原文的 token 预算（pi-mono compaction 的 keepRecentTokens）：从最新一条
+    # 向前累积估算 token，超出预算的更早消息折叠进摘要或当轮被截断。肥消息（长
+    # 答复、大段粘贴）会把窗口压到条数上限以内——条数与 token 消耗没有稳定换算
+    # （deepseek-harness compaction-basic 自述其平价 4 字符/token 低估中文），
+    # 所以窗口边界必须用 token 表达；估算器见 services/token_budget.py。
+    memory_keep_recent_tokens: int = Field(default=8000)
+    # （摘要 + 近窗）进入模型的总 token 预算。pi 用 contextTokens > window -
+    # reserveTokens 按模型窗口反推；单机要面对不同窗口的候选模型，直接配置总额
+    # 更稳。超过即视为 token 压力，触发一次后台压缩。
+    memory_context_token_budget: int = Field(default=24000)
+    # 批量折叠门槛：消息总数超过该值才走"条数"路径发起摘要（摊薄小模型调用）。
+    # token 压力路径不受此门槛限制——压力是当前的事。细消息的长对话仍靠这条路径
+    # 把开头内容卷进摘要，否则又回到"长对话锚在开头/丢开头"的老问题。
     memory_compact_trigger: int = Field(default=40)
+    # 摘要字数上限。结构化模板分段多，原来的 300 字偏紧。
+    memory_summary_max_chars: int = Field(default=600)
 
     # --- 意图门控 ---
     # 进 Agent 循环前做一次廉价意图分类（规则优先，模糊时用改写小模型）：

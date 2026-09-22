@@ -112,6 +112,7 @@ async def test_unknown_workspace_returns_404(app_with_temp_storage) -> None:
 def test_history_drops_stale_document_answers() -> None:
     """The conversation is replayed verbatim; freshness is handled per turn instead."""
     from app.api.routes import _to_langchain_history
+    from app.config import get_settings
     from app.models import Message, MessageRole
 
     rows = [
@@ -125,13 +126,44 @@ def test_history_drops_stale_document_answers() -> None:
         Message(workspace_id="w", role=MessageRole.assistant, content="不客气，随时找我。"),
     ]
 
-    history = _to_langchain_history(rows)
+    history = _to_langchain_history(rows, get_settings())
     assert [message.content for message in history] == [
         "销售表里有什么？",
         "销售表中 A型 的销售额是 1000。",
         "谢谢你",
         "不客气，随时找我。",
     ]
+
+
+def test_history_token_cap_keeps_the_newest_tail() -> None:
+    """The verbatim tail is a token budget, not just a message count: fat turns
+    shrink the window below ``memory_recent_messages``, always keeping the newest."""
+    from app.api.routes import _to_langchain_history
+    from app.config import get_settings
+    from app.models import Message, MessageRole
+
+    settings = get_settings()
+    rows = [
+        Message(workspace_id="w", role=MessageRole.user if i % 2 == 0 else MessageRole.assistant, content="长" * 800)
+        for i in range(25)
+    ]
+
+    # No summary: budget = keep_recent_tokens (8000) -> exactly 10 × 800 fit.
+    history = _to_langchain_history(rows, settings)
+    assert len(history) == 10
+    assert history[-1].content == "长" * 800  # newest row is indivisible
+
+    # A fat summary eats the shared budget: 24000 - 20000 = 4000 -> 5 turns.
+    history = _to_langchain_history(rows, settings, summary="摘" * 20000)
+    assert len(history) == 5
+
+    # Thin turns under the cap are unaffected: the count cap (20) binds first.
+    thin = [
+        Message(workspace_id="w", role=MessageRole.user, content=f"第{i}轮")
+        for i in range(30)
+    ]
+    assert len(_to_langchain_history(thin, settings)) == settings.memory_recent_messages
+    assert _to_langchain_history(thin, settings)[0].content == "第10轮"
 
 
 def test_files_changed_since_last_turn(temp_session, file_root) -> None:

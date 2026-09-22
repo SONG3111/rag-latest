@@ -1,18 +1,33 @@
-"""Conversation memory compaction: rolling summary + recent original turns.
+"""Conversation memory compaction: rolling summary + token-budgeted recent window.
 
-Pattern from nageoffer/ragent (Apache-2.0, ``AgentContextCompactionMiddleware`` /
-``AgentMemoryPipeline``, code-tree verified): keep the most recent turns verbatim,
-compress older material into a persistent summary, trigger compaction only past a
-watermark, and degrade to plain truncation on any failure. The single-machine
-version differs deliberately:
+Compaction pattern from nageoffer/ragent (Apache-2.0,
+``AgentContextCompactionMiddleware`` / ``AgentMemoryPipeline``, code-tree
+verified): keep the most recent turns verbatim, compress older material into a
+persistent summary, trigger compaction only past a watermark, and degrade to
+plain truncation on any failure. The window arithmetic was later re-based onto
+what pi-mono documents in ``packages/coding-agent/docs/compaction.md`` and
+DeepSeek's harness ships in ``packages/compaction/compaction-basic``: *token*
+budgets, not message counts —
 
-* the trigger is a message-count watermark, not a token watermark — counting rows
-  is free and good enough at this scale;
-* the summary runs on the cheap rewrite-model channel and every failure keeps the
-  previous summary (or none) — an older summary beats a broken chat turn;
-* the summary is injected as background context only. File-freshness facts are
-  never its responsibility: staleness is decided deterministically by timestamp
-  comparison in the routes layer.
+* the trigger is token pressure (estimated summary + recent window vs.
+  ``memory_context_token_budget``, pi's ``contextTokens > window - reserve``
+  with a directly configured budget), ORed with the original message-count
+  gate — thin old turns must still fold even when tokens are cheap, or the
+  opening context is silently dropped exactly like before the summary existed;
+* the verbatim keep boundary walks backward from the newest message within
+  ``memory_keep_recent_tokens`` (pi's ``keepRecentTokens``); rows are only ever
+  cut at message boundaries, and the newest message is indivisible;
+* the ``covered_count`` bookmark plays the role of pi's ``firstKeptEntryId``:
+  raw rows are never deleted or rewritten, compaction just moves the window
+  start, which is what makes a re-run idempotent.
+
+Shared with the original migration: the summary runs on the cheap
+rewrite-model channel and every failure keeps the previous summary — an older
+summary beats a broken chat turn; the summary is injected as background
+context only. File-freshness facts are never its responsibility: staleness is
+decided deterministically by timestamp comparison in the routes layer, which
+is also why pi's cumulative <read-files>/<modified-files> ledger is
+deliberately not adopted here.
 """
 
 from __future__ import annotations
@@ -20,12 +35,13 @@ from __future__ import annotations
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
 from ..llm.providers import build_chat_model
 from ..models import ConversationSummary, Message, MessageRole
+from .token_budget import estimate_messages, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +73,42 @@ def load_summary(session: Session, workspace_id: str) -> str | None:
     return row.summary.strip()
 
 
+def uncovered_count(session: Session, workspace_id: str) -> int:
+    """How many stored messages the current summary does not cover.
+
+    ``covered_count`` counts from the oldest row, so the uncovered tail needs
+    the table total. A caller that fetched only the newest N rows uses this to
+    drop exactly the rows the summary already carries (pi slices by
+    ``firstKeptEntryId``; the bookmark arithmetic here is the same idea).
+    """
+    total = session.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.workspace_id == workspace_id)
+    )
+    existing = session.get(ConversationSummary, workspace_id)
+    covered = existing.covered_count if existing else 0
+    return max(0, (total or 0) - covered)
+
+
 def compact_memory(
     session: Session,
     workspace_id: str,
     settings: Settings | None = None,
     *,
     summarizer=None,
+    force: bool = False,
 ) -> bool:
     """Fold all but the most recent turns into the rolling summary.
 
-    Returns True when a new summary was stored. Called after a turn completes
-    (background task), so the extra latency never blocks the user. With no
-    summarizer the small rewrite model is used; a failed or empty summarization
-    keeps the previous state — the next turn simply falls back to truncation.
+    Returns True when a new summary was stored. Normally called after a turn
+    completes (background task), so the extra latency never blocks the user;
+    ``force=True`` is the synchronous emergency path (context overflow before a
+    retry): it skips the trigger check and halves the verbatim tail budget so
+    the retried request fits even if the estimate was optimistic. With no
+    summarizer the small rewrite model is used; a failed or empty
+    summarization keeps the previous state — the next turn simply falls back
+    to truncation.
     """
     settings = settings or get_settings()
     rows = list(
@@ -79,16 +118,32 @@ def compact_memory(
             .order_by(Message.created_at.asc(), Message.id.asc())
         )
     )
-    recent = settings.memory_recent_messages
-    if len(rows) <= max(recent, settings.memory_compact_trigger):
-        # Below the watermark the plain truncation the history assembly already
-        # does is indistinguishable from compaction, so don't pay for a summary.
+    if not rows:
         return False
-
-    to_compress = rows[:-recent]
     existing = session.get(ConversationSummary, workspace_id)
     covered = existing.covered_count if existing else 0
+    recent = settings.memory_recent_messages
+
+    keep_budget = settings.memory_keep_recent_tokens
+    if force:
+        keep_budget = max(keep_budget // 2, 1)
+    keep = _keep_boundary(rows, keep_budget, recent)
+    to_compress = rows[:-keep]
+
+    # Count gate: batch old thin turns so the summary call is amortized (the
+    # original watermark). Token gate: pressure is current, it cannot wait for
+    # a batch. Either alone triggers a fold.
+    count_gate = len(rows) > max(recent, settings.memory_compact_trigger)
+    pressure = _token_pressure(
+        existing.summary if existing else None, rows[covered:], recent, settings
+    )
+    if not (force or count_gate or pressure):
+        # Below both gates the plain truncation the history assembly already
+        # does is indistinguishable from compaction, so don't pay for a summary.
+        return False
     if len(to_compress) <= covered:
+        # Nothing new beyond the bookmark (force keeps this check: re-folding
+        # covered rows would spend a model call to reproduce the same summary).
         return False
 
     prompt = _build_prompt(existing.summary if existing else None, to_compress)
@@ -117,6 +172,37 @@ def compact_memory(
         workspace_id,
     )
     return True
+
+
+def _keep_boundary(rows: list[Message], token_budget: int, max_count: int) -> int:
+    """How many of the newest rows stay verbatim; the rest folds into the summary.
+
+    Backward walk over token estimates (pi's cut-point walk). The count cap is
+    ``memory_recent_messages`` — the routes layer replays at most that many
+    rows, so folding less would waste summary coverage on rows the model never
+    sees. At least one row is always kept: a window that cannot hold the
+    newest message is not something a summary can fix.
+    """
+    kept = 0
+    total = 0
+    for row in reversed(rows):
+        if kept >= max_count:
+            break
+        cost = estimate_tokens(row.content or "")
+        if kept > 0 and total + cost > token_budget:
+            break
+        total += cost
+        kept += 1
+    return kept
+
+
+def _token_pressure(
+    previous: str | None, uncovered: list[Message], recent: int, settings: Settings
+) -> bool:
+    """Estimated summary + recent window vs. the model-visible token budget."""
+    window = uncovered[-recent:]
+    used = estimate_tokens(previous or "") + estimate_messages(window)
+    return used > settings.memory_context_token_budget
 
 
 def _build_prompt(previous: str | None, rows: list[Message]) -> str:
