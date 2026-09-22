@@ -109,6 +109,30 @@ def uncovered_count(session: Session, workspace_id: str) -> int:
     return max(0, (total or 0) - covered)
 
 
+def shrink_history(messages: list, token_budget: int) -> list:
+    """Head-reduce an in-memory LangChain history to the newest turns that fit.
+
+    Same backward walk as the keep boundary, over messages instead of rows.
+    Used by the overflow retry: the provider has already confirmed the request
+    was too large, so this turn shrinks without waiting on another summarizer
+    round-trip (dsh's "one maximal balanced head reduction"); the durable half
+    — folding fat older turns into the summary so later turns start slim — is
+    the caller's ``compact_memory(..., force=True)``.
+    """
+    from .token_budget import estimate_message
+
+    kept: list = []
+    total = 0
+    for message in reversed(messages):
+        cost = estimate_message(message)
+        if kept and total + cost > token_budget:
+            break
+        total += cost
+        kept.append(message)
+    kept.reverse()
+    return kept
+
+
 def compact_memory(
     session: Session,
     workspace_id: str,

@@ -79,6 +79,11 @@ def estimate_tokens(text: str) -> int:
     return cjk + math.ceil(other / _OTHER_CHARS_PER_TOKEN)
 
 
+def estimate_message(message: Any) -> int:
+    """Estimate for one object exposing ``.content`` (DB row or LangChain message)."""
+    return estimate_tokens(_text_of(getattr(message, "content", message)))
+
+
 def estimate_messages(messages: Iterable[Any]) -> int:
     """Total estimate over objects exposing ``.content`` (DB rows or LangChain messages)."""
-    return sum(estimate_tokens(_text_of(getattr(message, "content", message))) for message in messages)
+    return sum(estimate_message(message) for message in messages)

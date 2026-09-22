@@ -61,6 +61,43 @@ def translate_provider_error(exc: BaseException) -> str:
     return f"模型调用失败：{exc}"
 
 
+# Vendor phrases that confirm the request exceeded the model's context window.
+# Matched against the raw vendor text (walking the __cause__ chain — the
+# resilient wrapper raises a translated ProviderError whose string deliberately
+# drops the vendor detail), never against the translation. Kept conservative:
+# a false positive costs one wasted retry, a miss just surfaces the raw error
+# like before. Role in the pipeline mirrors dsh compaction-basic's
+# CONTEXT_WINDOW_EXCEEDED and pi's "overflow" reason code: a provider-confirmed
+# overflow authorizes one compact-and-retry regardless of the normal trigger.
+_OVERFLOW_MARKERS = (
+    "maximum context length",  # OpenAI-style sentence
+    "context length exceeded",
+    "context_length_exceeded",  # OpenAI error code
+    "exceeds context window",
+    "input length exceed",  # DashScope qwen
+    "input is too long",
+    "prompt is too long",
+    "tokens exceed",
+    "上下文长度",
+    "输入过长",
+    "超出上下文",
+    "长度超过限制",
+)
+
+
+def is_context_overflow_error(exc: BaseException) -> bool:
+    """Whether this exception chain carries a confirmed context-window overflow."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).lower()
+        if any(marker in text for marker in _OVERFLOW_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class CircuitBreaker:
     """Three-state breaker (closed / open / half-open) for one model.
 

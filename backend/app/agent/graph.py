@@ -858,6 +858,30 @@ class WorkspaceAgent:
             return
         yield AgentEvent("done", {"content": "".join(streamed).strip()})
 
+    def _compact_for_overflow(self) -> bool:
+        """Durable half of the overflow recovery: force a compaction fold.
+
+        The provider confirmed the request was too large, so the normal trigger
+        is bypassed and the keep budget halves (dsh compaction-basic: overflow
+        "may force a useful balanced reduction even below the normal
+        threshold"). Moving the bookmark means the *next* turn's history starts
+        slim; this turn shrinks in memory instead. Runs on the cheap rewrite
+        channel and fails open — a failed fold still leaves the in-memory head
+        reduction for the retry.
+        """
+        from ..services.memory import compact_memory
+
+        try:
+            compacted = compact_memory(
+                self.session, self.workspace.id, self.settings, force=True
+            )
+            self.session.commit()
+            return compacted
+        except Exception as exc:
+            logger.warning("emergency compaction before overflow retry failed: %s", exc)
+            self.session.rollback()
+            return False
+
     async def astream(
         self,
         user_message: str,
@@ -899,85 +923,130 @@ class WorkspaceAgent:
         # so the message id is tracked to avoid interleaving separate calls.
         streamed_parts: list[str] = []
 
-        try:
-            async for mode, chunk in graph.astream(
-                state, stream_mode=["updates", "messages"]
-            ):
-                if mode == "messages":
-                    message_chunk, metadata = chunk
-                    if (metadata or {}).get("langgraph_node") != "agent":
+        # At most one context-overflow retry (dsh compaction-basic's overflow
+        # recovery): a provider-confirmed overflow before the first packet
+        # authorizes a forced compaction plus one head-reduced retry. Tokens
+        # already streamed belong to the user — past that point an error
+        # surfaces instead of a retry, same as any mid-stream failure.
+        attempt = 0
+        while True:
+            try:
+                async for mode, chunk in graph.astream(
+                    state, stream_mode=["updates", "messages"]
+                ):
+                    if mode == "messages":
+                        message_chunk, metadata = chunk
+                        if (metadata or {}).get("langgraph_node") != "agent":
+                            continue
+                        # Reasoning fragments stream to their own SSE event so the UI
+                        # can show what the model is deliberating; they must never
+                        # count as answer text (an answer that lives only in the
+                        # thinking channel still triggers the empty-answer nudge).
+                        reasoning = _reasoning_text(message_chunk)
+                        if reasoning:
+                            yield AgentEvent("thinking", {"text": reasoning})
+                        text = _message_text(getattr(message_chunk, "content", None))
+                        if not text:
+                            continue
+                        message_id = getattr(message_chunk, "id", None)
+                        if message_id != streamed_message_id:
+                            # A new model call started; earlier text belonged to a
+                            # different turn of the loop, so the buffer restarts.
+                            streamed_message_id = message_id
+                            streamed_parts = []
+                        streamed_parts.append(text)
+                        yield AgentEvent("token", {"text": text})
                         continue
-                    # Reasoning fragments stream to their own SSE event so the UI
-                    # can show what the model is deliberating; they must never
-                    # count as answer text (an answer that lives only in the
-                    # thinking channel still triggers the empty-answer nudge).
-                    reasoning = _reasoning_text(message_chunk)
-                    if reasoning:
-                        yield AgentEvent("thinking", {"text": reasoning})
-                    text = _message_text(getattr(message_chunk, "content", None))
-                    if not text:
-                        continue
-                    message_id = getattr(message_chunk, "id", None)
-                    if message_id != streamed_message_id:
-                        # A new model call started; earlier text belonged to a
-                        # different turn of the loop, so the buffer restarts.
-                        streamed_message_id = message_id
-                        streamed_parts = []
-                    streamed_parts.append(text)
-                    yield AgentEvent("token", {"text": text})
+
+                    for node, update in chunk.items():
+                        if not isinstance(update, dict):
+                            continue
+
+                        if node == "agent":
+                            for notice in update.get("notices") or []:
+                                yield AgentEvent("notice", {"message": notice})
+                            produced = update.get("messages") or []
+                            for message in produced:
+                                if not isinstance(message, AIMessage):
+                                    continue
+                                for call in getattr(message, "tool_calls", []) or []:
+                                    yield AgentEvent(
+                                        "tool_call",
+                                        {
+                                            "tool": call.get("name"),
+                                            "args": call.get("args") or {},
+                                            "label": _summarize_tool_call(
+                                                call.get("name", ""), call.get("args") or {}
+                                            ),
+                                        },
+                                    )
+
+                        elif node == "tools":
+                            for message in update.get("messages") or []:
+                                if isinstance(message, ToolMessage):
+                                    yield AgentEvent(
+                                        "tool_result",
+                                        {
+                                            "tool_call_id": message.tool_call_id,
+                                            "content": _message_text(message.content),
+                                        },
+                                    )
+                            for proposal in update.get("proposals") or []:
+                                yield AgentEvent("proposal", proposal)
+                            citations = update.get("citations") or []
+                            if citations:
+                                yield AgentEvent("citations", {"items": citations})
+            except NodeCancelledError:
+                # A cancelled node means the turn was aborted (client disconnect or
+                # the turn-level timeout); the SSE layer persists the partial answer,
+                # so the cancellation must not become an error frame here.
+                raise
+            except Exception as exc:
+                from ..llm.resilience import is_context_overflow_error
+
+                if (
+                    attempt == 0
+                    and not streamed_parts
+                    and is_context_overflow_error(exc)
+                ):
+                    attempt += 1
+                    yield AgentEvent(
+                        "notice",
+                        {"message": "上下文超过模型限制，正在压缩对话历史后重试。"},
+                    )
+                    from ..services.memory import shrink_history
+
+                    # Durable half: fold fat older turns into the summary so the
+                    # next turn's bookmarked history starts slim. This turn's
+                    # shrink is the in-memory head reduction below.
+                    self._compact_for_overflow()
+                    history = shrink_history(
+                        history, max(self.settings.memory_keep_recent_tokens // 2, 1)
+                    )
+                    messages = [*history, HumanMessage(content=user_message)]
+                    state = {
+                        "messages": messages,
+                        "iterations": 0,
+                        "citations": [],
+                        "proposals": [],
+                        "tool_calls_made": 0,
+                        "nudges": 0,
+                        "last_failure": None,
+                        "failure_repeats": 0,
+                        "notices": [],
+                    }
+                    graph = self._build_graph()
+                    streamed_message_id = None
+                    streamed_parts = []
                     continue
+                logger.exception("agent run failed")
+                # Provider errors are translated to one actionable sentence here, so
+                # the SSE error frame never carries a raw vendor traceback.
+                from ..llm.resilience import translate_provider_error
 
-                for node, update in chunk.items():
-                    if not isinstance(update, dict):
-                        continue
-
-                    if node == "agent":
-                        for notice in update.get("notices") or []:
-                            yield AgentEvent("notice", {"message": notice})
-                        produced = update.get("messages") or []
-                        for message in produced:
-                            if not isinstance(message, AIMessage):
-                                continue
-                            for call in getattr(message, "tool_calls", []) or []:
-                                yield AgentEvent(
-                                    "tool_call",
-                                    {
-                                        "tool": call.get("name"),
-                                        "args": call.get("args") or {},
-                                        "label": _summarize_tool_call(
-                                            call.get("name", ""), call.get("args") or {}
-                                        ),
-                                    },
-                                )
-
-                    elif node == "tools":
-                        for message in update.get("messages") or []:
-                            if isinstance(message, ToolMessage):
-                                yield AgentEvent(
-                                    "tool_result",
-                                    {
-                                        "tool_call_id": message.tool_call_id,
-                                        "content": _message_text(message.content),
-                                    },
-                                )
-                        for proposal in update.get("proposals") or []:
-                            yield AgentEvent("proposal", proposal)
-                        citations = update.get("citations") or []
-                        if citations:
-                            yield AgentEvent("citations", {"items": citations})
-        except NodeCancelledError:
-            # A cancelled node means the turn was aborted (client disconnect or
-            # the turn-level timeout); the SSE layer persists the partial answer,
-            # so the cancellation must not become an error frame here.
-            raise
-        except Exception as exc:
-            logger.exception("agent run failed")
-            # Provider errors are translated to one actionable sentence here, so
-            # the SSE error frame never carries a raw vendor traceback.
-            from ..llm.resilience import translate_provider_error
-
-            yield AgentEvent("error", {"message": translate_provider_error(exc)})
-            return
+                yield AgentEvent("error", {"message": translate_provider_error(exc)})
+                return
+            break
 
         # The streamed tokens are the authoritative text when the graph produced any;
         # `final_text` is the fallback for providers that do not emit chunks.
