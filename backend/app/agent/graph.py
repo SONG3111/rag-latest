@@ -46,6 +46,7 @@ from ..config import Settings, get_settings
 from ..mcp_client import McpOfficeClient, parse_tool_result
 from ..models import Operation, Workspace
 from ..retrieval.pipeline import Retriever
+from ..services.spill import spill_tool_result
 from ..services.operations import (
     build_tool_arguments,
     create_operation,
@@ -638,6 +639,26 @@ class WorkspaceAgent:
                         "path": data.get("path"),
                         "diff": data.get("diff") or [],
                     })
+
+                # Oversized results spill to disk before entering the model's
+                # context (deepseek-harness packages/spill): the model keeps a
+                # preview plus retrieval guidance instead of the full text.
+                # Citations and proposals were already extracted from the full
+                # payload above, so they stay complete. Pending approvals are
+                # never spilled — their envelope is the model's only view of
+                # the operation it is asked to describe.
+                if (
+                    isinstance(data, dict)
+                    and data.get("status") != "pending_user_approval"
+                ):
+                    spilled = spill_tool_result(
+                        name,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        workspace_id=self.workspace.id,
+                        settings=self.settings,
+                    )
+                    if spilled is not None:
+                        payload = json.loads(spilled)
 
                 # Replace the message so hints and scoping are what the client sees.
                 messages[messages.index(message)] = ToolMessage(

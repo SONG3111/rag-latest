@@ -143,6 +143,12 @@ class Settings(BaseSettings):
     memory_compact_trigger: int = Field(default=40)
     # 摘要字数上限。结构化模板分段多，原来的 300 字偏紧。
     memory_summary_max_chars: int = Field(default=600)
+    # 工具结果溢写阈值（deepseek-harness packages/spill 的定位符模式）：超过该
+    # 字符数的工具结果不整体进入模型上下文，只保留预览 + 检索指引，全文落盘到
+    # data_dir/spill/<workspace_id>/（工作区之外，绝不进向量索引）。检索结果
+    # （top_k × 512-token 块）是现实中的超限大户，Excel/Word 读取工具自带输出
+    # 上限，基本碰不到这条线。
+    tool_result_spill_chars: int = Field(default=8000)
 
     # --- 意图门控 ---
     # 进 Agent 循环前做一次廉价意图分类（规则优先，模糊时用改写小模型）：
