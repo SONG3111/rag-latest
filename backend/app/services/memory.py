@@ -50,19 +50,37 @@ logger = logging.getLogger(__name__)
 # long tool-heavy answers would otherwise blow the small model's context.
 _PER_MESSAGE_CHAR_LIMIT = 500
 
+# Structured summary template — the section set is the Chinese convergence of
+# pi-mono's default compaction sections (Goal / Key Decisions / Progress / Next
+# Steps / Critical Context, docs/compaction.md) and dsh compaction-basic's
+# checklist (Primary Request / Files and Code / Errors and Fixes / Pending Jobs
+# / Next Step). Fixed sections survive iterative re-summarization far better
+# than free prose: the merge instruction targets paragraphs, so an old summary
+# is folded into its place instead of copied verbatim (both upstream projects
+# merge, never append). Deliberately absent: pi's cumulative
+# <read-files>/<modified-files> ledger — file-freshness facts never enter the
+# summary here (see ConversationSummary); staleness is decided by timestamp
+# comparison in the routes layer.
 COMPACT_SYSTEM_PROMPT = """## 角色
 对话记忆压缩助手。
 
 ## 任务与步骤
-1. 把对话历史压缩成一段简洁摘要，作为后续对话理解上下文的背景。
-2. 已有旧摘要时，把它当作其中一部分内容一并整合，而不是另起炉灶。
+1. 把对话历史压缩成一份结构化摘要，作为后续对话理解上下文的背景。
+2. 已有旧摘要时，把它的内容**合并进下面对应的段落**（改写整合，不是原样粘贴）。
+
+## 输出格式（Markdown，固定以下段落，顺序不变）
+### 用户目标与意图
+### 关键事实与决定
+（文件名、工作表、单元格、数值、日期、已确认的结论；重复内容合并）
+### 错误与修复
+### 未决事项与下一步
+### 关键背景
+（寒暄之外、理解后续对话必需的语境）
 
 ## 要求与限制
-- 保留用户的目标、已确认的关键事实：文件名、工作表、单元格、数值、日期、结论。
-- 合并重复内容，丢弃寒暄与客套。
+- 某段没有内容就只写「（无）」。
 - 不要回答问题，不要补充对话里没有的信息，不要编造。
-- 只输出摘要本身，不超过 300 字，不要标题和前缀。
-"""
+- 只输出摘要本身，不超过 {max_chars} 字，不要额外说明。"""
 
 
 def load_summary(session: Session, workspace_id: str) -> str | None:
@@ -213,6 +231,17 @@ def _build_prompt(previous: str | None, rows: list[Message]) -> str:
         if not content:
             continue
         lines.append(f"{role}: {content[:_PER_MESSAGE_CHAR_LIMIT]}")
+        # Write proposals live on the assistant row as structured dicts; their
+        # tool/path/summary triple is exactly the "Files and Code" material a
+        # summary needs, and it survives even when the prose answer was terse.
+        for proposal in row.tool_calls or []:
+            if not isinstance(proposal, dict):
+                continue
+            tool = proposal.get("tool") or proposal.get("name") or "未知工具"
+            path = proposal.get("path") or ""
+            brief = str(proposal.get("summary") or "")[:200]
+            location = f"（{path}）" if path else ""
+            lines.append(f"修改提案: {tool}{location} {brief}".strip())
     parts = []
     if previous and previous.strip():
         parts.append(f"## 旧摘要\n{previous.strip()}\n")
@@ -232,8 +261,11 @@ def _summarize(settings: Settings, prompt: str) -> str | None:
             temperature=0.0,
             timeout=settings.query_rewrite_timeout,
         )
+        system_prompt = COMPACT_SYSTEM_PROMPT.format(
+            max_chars=settings.memory_summary_max_chars
+        )
         response = llm.invoke(
-            [SystemMessage(content=COMPACT_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            [SystemMessage(content=system_prompt), HumanMessage(content=prompt)]
         )
         text = _flatten(response.content).strip()
         return text or None

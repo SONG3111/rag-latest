@@ -236,6 +236,62 @@ def test_uncovered_count_measures_the_tail_beyond_the_bookmark(temp_session, wor
 
 
 # --------------------------------------------------------------------------- #
+# Structured summary template (pi-mono / dsh compaction-basic section sets)
+# --------------------------------------------------------------------------- #
+def test_structured_template_has_fixed_sections_and_a_bounded_length():
+    from app.config import get_settings
+    from app.services.memory import COMPACT_SYSTEM_PROMPT
+
+    settings = get_settings()
+    rendered = COMPACT_SYSTEM_PROMPT.format(max_chars=settings.memory_summary_max_chars)
+    for section in (
+        "### 用户目标与意图",
+        "### 关键事实与决定",
+        "### 错误与修复",
+        "### 未决事项与下一步",
+        "### 关键背景",
+    ):
+        assert section in rendered
+    # The length bound comes from settings, not a hardcoded figure.
+    assert str(settings.memory_summary_max_chars) in rendered
+    # File-freshness facts stay out of the summary's remit by design.
+    assert "时效" not in COMPACT_SYSTEM_PROMPT
+
+
+def test_write_proposals_enter_the_prompt_as_summary_material(temp_session, workspace_id):
+    from app.config import get_settings
+
+    settings = get_settings()
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    temp_session.add(
+        Message(
+            workspace_id=workspace_id,
+            role=MessageRole.assistant,
+            content="已经为你生成修改提案。",
+            tool_calls=[
+                {
+                    "operation_id": "op-1",
+                    "tool": "update_cells",
+                    "summary": "把 B2 改为 5000",
+                    "path": "报销.xlsx",
+                    "diff": [{"cell": "B2", "to": 5000}],
+                }
+            ],
+            created_at=base,
+        )
+    )
+    _seed_messages(temp_session, workspace_id, turns=settings.memory_compact_trigger + 1)
+    prompts: list[str] = []
+    assert compact_memory(
+        temp_session,
+        workspace_id,
+        settings,
+        summarizer=lambda prompt: prompts.append(prompt) or "摘要",
+    ) is True
+    assert "修改提案: update_cells（报销.xlsx） 把 B2 改为 5000" in prompts[0]
+
+
+# --------------------------------------------------------------------------- #
 # SSE-level: a stored summary reaches the model as background context
 # --------------------------------------------------------------------------- #
 class ScriptedLLM:
