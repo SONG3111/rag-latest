@@ -27,6 +27,12 @@
     <java.version>21</java.version>
     <sqlite-jdbc.version>3.53.4.0</sqlite-jdbc.version>
     <wiremock.version>3.13.2</wiremock.version>
+    <!-- 与 Spring Cloud 2025.1 对齐；只用核心模块（无 Jackson 依赖），
+         刻意不引 resilience4j-spring-boot3 starter：其配置模块依赖 Jackson 2，
+         与 Boot 4 的 Jackson 3 有已知摩擦（resilience4j#2351）。
+         重试/并发限制用 Spring Framework 7 原生注解（见 ResilienceConfig），
+         这里只补框架未内建的熔断与舱壁。 -->
+    <resilience4j.version>2.3.0</resilience4j.version>
   </properties>
 
   <dependencies>
@@ -56,6 +62,23 @@
     <dependency>
       <groupId>io.projectreactor.netty</groupId>
       <artifactId>reactor-netty-http</artifactId>
+    </dependency>
+
+    <!-- 韧性容错：熔断（含 Reactor 操作符）与信号量舱壁。核心模块无 Jackson 依赖。 -->
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-circuitbreaker</artifactId>
+      <version>${resilience4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-reactor</artifactId>
+      <version>${resilience4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-bulkhead</artifactId>
+      <version>${resilience4j.version}</version>
     </dependency>
 
     <dependency>

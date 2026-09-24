@@ -2,6 +2,8 @@ package com.raglatest.backend.api;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -40,6 +42,28 @@ public class ApiExceptionHandler {
     public ResponseEntity<ObjectNode> uploadTooLarge(MaxUploadSizeExceededException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(detail("file exceeds the upload limit"));
+    }
+
+    /** Spring Framework 7 原生 @ConcurrencyLimit(REJECT) 超限拒绝。 */
+    @ExceptionHandler(org.springframework.resilience.InvocationRejectedException.class)
+    public ResponseEntity<ObjectNode> concurrencyRejected(
+            org.springframework.resilience.InvocationRejectedException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(detail("当前请求过多，请稍后重试"));
+    }
+
+    /** Resilience4j 熔断打开：调用被快速拒绝。 */
+    @ExceptionHandler(CallNotPermittedException.class)
+    public ResponseEntity<ObjectNode> circuitOpen(CallNotPermittedException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(detail("AI 服务暂时不可用，请稍后重试"));
+    }
+
+    /** Resilience4j 舱壁已满：并发回合达上限。 */
+    @ExceptionHandler(BulkheadFullException.class)
+    public ResponseEntity<ObjectNode> bulkheadFull(BulkheadFullException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(detail("当前对话请求过多，请稍后重试"));
     }
 
     @ExceptionHandler(Exception.class)

@@ -202,6 +202,103 @@ def test_children_are_ranked_and_parents_supply_context(
 
 
 # --------------------------------------------------------------------------- #
+# stateless corpus loader (M2: 语料经 /internal/retrieval-corpus 回读)
+# --------------------------------------------------------------------------- #
+def test_corpus_loader_replaces_the_session(temp_session, tmp_path, monkeypatch) -> None:
+    """与 session 版同一套行为：child 排序、parent 附上下文、file map 给出路径。"""
+    workspace = _seed(temp_session, tmp_path, monkeypatch)
+    child_ids = _child_ids(temp_session, workspace.id)
+
+    from sqlalchemy import select
+
+    from app.models import Chunk, DocumentFile
+
+    chunks = list(
+        temp_session.scalars(select(Chunk).where(Chunk.workspace_id == workspace.id))
+    )
+    files = {
+        row.id: row.rel_path
+        for row in temp_session.scalars(
+            select(DocumentFile).where(DocumentFile.workspace_id == workspace.id)
+        )
+    }
+    loader_calls = []
+
+    def loader():
+        from app.retrieval.pipeline import ChunkRecord
+
+        loader_calls.append(1)
+        return files, [
+            ChunkRecord(
+                id=row.id,
+                file_id=row.file_id,
+                parent_id=row.parent_id,
+                level=row.level,
+                text=row.text,
+                location=row.location,
+                meta=row.meta or {},
+                token_counts=row.token_counts or {},
+                token_length=row.token_length,
+                ordinal=row.ordinal,
+            )
+            for row in chunks
+        ]
+
+    retriever = Retriever(
+        None,
+        workspace.id,
+        embeddings=FakeEmbeddings(),
+        vector_store=FakeVectorStore(child_ids),
+        reranker=ScriptedReranker(
+            order=list(range(len(child_ids))), scores=[0.9] * len(child_ids)
+        ),
+        rewriter=FixedRewriter("张伟的报销金额"),
+        corpus_loader=loader,
+    )
+    hits = retriever.search("张伟报销多少", use_dense=True, use_rerank=True)
+    assert hits
+    # 一次 search 只回读一次语料（children/parents/file map 共享同一结果）。
+    assert len(loader_calls) == 1
+
+    hit = hits[0]
+    assert hit.rel_path in files.values()
+    assert hit.parent_text is not None
+    assert hit.parent_location is not None
+
+
+def test_corpus_loader_misses_map_to_placeholder_file(temp_session, tmp_path, monkeypatch) -> None:
+    """语料里 file_id 对不上文件表时的兜底行为与 session 版一致。"""
+    workspace = _seed(temp_session, tmp_path, monkeypatch)
+    child_ids = _child_ids(temp_session, workspace.id)
+
+    from app.retrieval.pipeline import ChunkRecord
+
+    def loader():
+        return {}, [
+            ChunkRecord(
+                id=chunk_id,
+                file_id="ghost-file",
+                parent_id=None,
+                level="child",
+                text="张伟的报销金额 3200",
+                location="报销明细!第2行",
+            )
+            for chunk_id in child_ids[:1]
+        ]
+
+    retriever = Retriever(
+        None,
+        workspace.id,
+        embeddings=FakeEmbeddings(),
+        vector_store=FakeVectorStore(child_ids[:1]),
+        rewriter=FixedRewriter("张伟"),
+        corpus_loader=loader,
+    )
+    hits = retriever.search("张伟", use_dense=True, use_rerank=False)
+    assert hits and hits[0].rel_path == "未知文件"
+
+
+# --------------------------------------------------------------------------- #
 # relevance gate
 # --------------------------------------------------------------------------- #
 def test_low_scores_are_gated_out_entirely(temp_session, tmp_path, monkeypatch) -> None:

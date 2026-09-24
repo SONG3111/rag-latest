@@ -20,6 +20,11 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.BAD_REQUEST, detail);
     }
 
+    /** 下游不可用 / 被韧性策略拒绝：统一 503。 */
+    public static ApiException serviceUnavailable(String detail) {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, detail);
+    }
+
     public HttpStatus status() {
         return status;
     }

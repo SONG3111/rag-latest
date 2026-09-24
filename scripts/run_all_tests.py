@@ -1,9 +1,11 @@
 """Run every automated test suite and print one summary.
 
 Suites:
-  backend   — pytest under ``backend/``: unit tests plus HTTP-level e2e that
+  ai-service — pytest under ``ai-service/``: unit tests plus HTTP-level e2e that
               spawns the real MCP document server (no API key needed; the LLM
               is never called).
+  backend-java — Maven test suite of the Java business backend via the pinned
+              wrapper jar (``java -cp``, no shell).
   mcp       — pytest under ``mcp-office-server/``: the Excel/Word tool
               contract and the sandbox path checks.
   frontend  — node checks under ``frontend/``: SSE frame parsing always,
@@ -36,7 +38,7 @@ def run_backend_pytest() -> int:
     """Unit + HTTP e2e suites; the configured pytest.ini selects tests/."""
     completed = subprocess.run(
         [sys.executable, "-m", "pytest"],
-        cwd=PROJECT_ROOT / "backend",
+        cwd=PROJECT_ROOT / "ai-service",
         shell=False,
     )
     return completed.returncode
@@ -44,13 +46,18 @@ def run_backend_pytest() -> int:
 
 def run_java_tests() -> int:
     """Java business backend. Runs the pinned Maven through its wrapper jar
-    (pure ``java -cp``, list-argv, no shell); needs a JDK 17+."""
+    (pure ``java -cp``, list-argv, no shell); needs a JDK 17+.
+
+    ``-Dmaven.multiModuleProjectDirectory`` 平台属性平时由 mvnw 脚本设置；绕过
+    脚本直跑 wrapper jar 时必须显式带上，否则 Maven 3.9 启动器直接报错退出。
+    """
     if not WRAPPER_JAR.exists():
         print("backend-java/.mvn/wrapper/maven-wrapper.jar missing; cannot run Maven")
         return 1
     completed = subprocess.run(
         [
             "java",
+            f"-Dmaven.multiModuleProjectDirectory={BACKEND_JAVA_DIR}",
             "-cp",
             str(WRAPPER_JAR),
             "org.apache.maven.wrapper.MavenWrapperMain",

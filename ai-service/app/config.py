@@ -169,6 +169,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(
         default=["http://localhost:5173", "http://127.0.0.1:5173"]
     )
+    # 无状态聊天部署里，检索语料与列表过滤所需的文件清单由 backend-java 的
+    # /internal 端点反向提供（app.db 只被 Java 进程打开）。
+    java_backend_base_url: str = Field(default="http://127.0.0.1:8000")
 
     @field_validator("cors_origins", mode="before")
     @classmethod

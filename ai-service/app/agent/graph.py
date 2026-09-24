@@ -22,7 +22,7 @@ import logging
 import operator
 import re
 from dataclasses import dataclass, field
-from typing import Annotated, Any, AsyncIterator, Literal, Sequence, TypedDict
+from typing import Annotated, Any, AsyncIterator, Callable, Literal, Sequence, TypedDict
 
 from langchain_core.messages import (
     AIMessage,
@@ -45,12 +45,13 @@ from pydantic import ValidationError
 from ..config import Settings, get_settings
 from ..mcp_client import McpOfficeClient, parse_tool_result
 from ..models import Operation, Workspace
-from ..retrieval.pipeline import Retriever
+from ..retrieval.pipeline import Corpus, Retriever
 from ..services.spill import spill_tool_result
 from ..services.operations import (
     build_tool_arguments,
     create_operation,
     extract_target_path,
+    summarize_operation,
     workspace_relative_path,
 )
 from .prompts import (
@@ -256,22 +257,59 @@ def _summarize_tool_call(name: str, args: dict[str, Any]) -> str:
     return f"正在调用 {name}"
 
 
+@dataclass
+class AgentRuntime:
+    """Everything the stateless chat endpoint passes in instead of a DB session.
+
+    In the split deployment backend-java owns persistence, so the agent runs
+    with ``session=None``/``workspace=None`` and this runtime carries the
+    per-turn facts the graph would otherwise read from SQLite:
+
+    * ``tracked_files`` replaces the DocumentFile query behind ``_scope_listing``;
+    * ``corpus_loader`` replaces the Retriever's session (one internal HTTP
+      call per search, served by Java's retrieval-corpus endpoint);
+    * ``proposals`` replaces ``create_operation``'s DB write: write tools only
+      collect specs here, and Java creates the durable Operation rows when it
+      intercepts the proposal frames;
+    * the ``memory_*`` fields carry the conversation's rolling-summary state so
+      the overflow path can run the pure compaction function, with any forced
+      result written back through ``forced_summary``/``forced_covered`` for the
+      persist frame.
+    """
+
+    workspace_id: str
+    tracked_files: set[str] = field(default_factory=set)
+    corpus_loader: Callable[[], Corpus] | None = None
+    proposals: list[dict] = field(default_factory=list)
+    # 溢出压缩的输入快照（请求消息 + 本轮 user 行，鸭子类型）与既有书签。
+    memory_rows: list = field(default_factory=list)
+    memory_summary: str | None = None
+    memory_covered: int = 0
+    # overflow 强制压缩的输出（由 _compact_for_overflow 写回）。
+    forced_summary: str | None = None
+    forced_covered: int | None = None
+
+
 class WorkspaceAgent:
     """Wraps the compiled graph plus everything it needs per conversation."""
 
     def __init__(
         self,
-        session: Session,
-        workspace: Workspace,
-        client: McpOfficeClient,
+        session: Session = None,
+        workspace: Workspace = None,
+        client: McpOfficeClient = None,
         settings: Settings | None = None,
         *,
         llm=None,
+        runtime: AgentRuntime | None = None,
     ) -> None:
+        if session is None and runtime is None:
+            raise ValueError("either a session or a runtime is required")
         self.session = session
         self.workspace = workspace
         self.client = client
         self.settings = settings or get_settings()
+        self.runtime = runtime
         self._llm = llm
         # Recent conversation turns, used to resolve elliptical follow-up questions
         # ("那第三条呢") during query rewriting.
@@ -286,6 +324,13 @@ class WorkspaceAgent:
         # Optional run tracer (app.services.tracing.TraceCollector); None disables
         # all instrumentation, which keeps the graph usable without observability.
         self._trace = None
+
+    @property
+    def _workspace_id(self) -> str:
+        """Workspace id from the ORM object, or the stateless runtime."""
+        if self.workspace is not None:
+            return self.workspace.id
+        return self.runtime.workspace_id
 
     # ------------------------------------------------------------------ #
     # tools
@@ -310,12 +355,19 @@ class WorkspaceAgent:
     def _knowledge_tool(self) -> BaseTool:
         """Wrap retrieval as a tool so the agent decides when to search."""
         session = self.session
-        workspace_id = self.workspace.id
+        workspace_id = self._workspace_id
         settings = self.settings
         agent = self
 
         def _search(query: str, top_k: int = 5) -> str:
-            retriever = Retriever(session, workspace_id, settings)
+            if agent.runtime is not None:
+                # 无状态模式：语料经内部端点从 backend-java 读取，session 为 None。
+                retriever = Retriever(
+                    None, workspace_id, settings,
+                    corpus_loader=agent.runtime.corpus_loader,
+                )
+            else:
+                retriever = Retriever(session, workspace_id, settings)
             hits = retriever.search(
                 query, top_k=top_k, history=agent._history, trace=agent._trace
             )
@@ -387,7 +439,7 @@ class WorkspaceAgent:
         """
         call = dict(request.tool_call)
         if call.get("name") not in self._gated_write_names:
-            call["args"] = build_tool_arguments(self.workspace.id, call.get("args") or {})
+            call["args"] = build_tool_arguments(self._workspace_id, call.get("args") or {})
         return await execute(request.override(tool_call=call))
 
     def _gated_write_tool(self, tool: BaseTool) -> BaseTool:
@@ -404,7 +456,7 @@ class WorkspaceAgent:
 
             rel_path = extract_target_path(enriched)
             try:
-                target = resolve_workspace_path(agent.workspace.id, rel_path)
+                target = resolve_workspace_path(agent._workspace_id, rel_path)
             except Exception as exc:
                 raise ToolProposalError(f"工作区里找不到文件「{rel_path}」: {exc}") from exc
             if not target.exists():
@@ -413,6 +465,36 @@ class WorkspaceAgent:
                     "请改用本轮 list_files / read_range 返回的确切路径重新提交提案"
                 )
             diff = await agent._read_before_values(name, enriched)
+            if agent.runtime is not None:
+                # 无状态模式：不写库。spec 收进 runtime，信封带全 arguments，
+                # tools_node 的 proposal 事件由此取全字段；operation_id 为 null，
+                # 由 Java 拦截帧时生成并替换后再落库转发。
+                summary = summarize_operation(name, rel_path, enriched)
+                agent.runtime.proposals.append(
+                    {
+                        "tool_name": name,
+                        "rel_path": rel_path,
+                        "arguments": enriched,
+                        "diff": diff,
+                        "summary": summary,
+                    }
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "status": "pending_user_approval",
+                            "operation_id": None,
+                            "tool": name,
+                            "path": rel_path,
+                            "summary": summary,
+                            "diff": diff,
+                            "arguments": enriched,
+                        },
+                        "note": "该修改已提交为待确认提案，尚未写入文件。",
+                    },
+                    ensure_ascii=False,
+                )
             operation = create_operation(
                 agent.session, agent.workspace.id, name, enriched, diff=diff
             )
@@ -461,20 +543,23 @@ class WorkspaceAgent:
 
         # Intersect with the user's own file list. The model should see exactly what
         # the workspace shows in the UI, not whatever bytes happen to sit on disk.
-        from sqlalchemy import select
+        if self.runtime is not None:
+            tracked = set(self.runtime.tracked_files)
+        else:
+            from sqlalchemy import select
 
-        from ..models import DocumentFile
+            from ..models import DocumentFile
 
-        tracked = {
-            row.rel_path
-            for row in self.session.scalars(
-                select(DocumentFile).where(
-                    DocumentFile.workspace_id == self.workspace.id
+            tracked = {
+                row.rel_path
+                for row in self.session.scalars(
+                    select(DocumentFile).where(
+                        DocumentFile.workspace_id == self.workspace.id
+                    )
                 )
-            )
-        }
+            }
 
-        prefix = f"{self.workspace.id}/"
+        prefix = f"{self._workspace_id}/"
         scoped: list[dict[str, Any]] = []
         for item in files:
             if not isinstance(item, dict):
@@ -632,13 +717,17 @@ class WorkspaceAgent:
                         )
 
                 if isinstance(data, dict) and data.get("status") == "pending_user_approval":
-                    proposals.append({
+                    proposal = {
                         "operation_id": data.get("operation_id"),
                         "tool": name,
                         "summary": data.get("summary"),
                         "path": data.get("path"),
                         "diff": data.get("diff") or [],
-                    })
+                    }
+                    if data.get("arguments") is not None:
+                        # 无状态模式：信封带全 arguments，Java 落 Operation 行要用。
+                        proposal["arguments"] = data["arguments"]
+                    proposals.append(proposal)
 
                 # Oversized results spill to disk before entering the model's
                 # context (deepseek-harness packages/spill): the model keeps a
@@ -654,7 +743,7 @@ class WorkspaceAgent:
                     spilled = spill_tool_result(
                         name,
                         json.dumps(payload, ensure_ascii=False, default=str),
-                        workspace_id=self.workspace.id,
+                        workspace_id=self._workspace_id,
                         settings=self.settings,
                     )
                     if spilled is not None:
@@ -783,7 +872,7 @@ class WorkspaceAgent:
         from ..services.files import resolve_workspace_path
 
         try:
-            target = resolve_workspace_path(self.workspace.id, rel_path)
+            target = resolve_workspace_path(self._workspace_id, rel_path)
         except Exception:
             return None
         if not target.exists():
@@ -810,7 +899,7 @@ class WorkspaceAgent:
 
         # The sandbox root is the shared workspaces directory, so every path handed
         # to a tool must be prefixed with the workspace id.
-        path = workspace_relative_path(self.workspace.id, raw_path)
+        path = workspace_relative_path(self._workspace_id, raw_path)
 
         diff: list[dict] = []
         for update in updates:
@@ -891,6 +980,27 @@ class WorkspaceAgent:
         reduction for the retry.
         """
         from ..services.memory import compact_memory
+
+        if self.runtime is not None:
+            # 无状态模式：请求侧消息快照上跑纯压缩函数，结果回写 runtime，
+            # persist 帧带给 Java 落 conversation_summaries。
+            from ..services.memory import compute_compaction
+
+            try:
+                result = compute_compaction(
+                    self.runtime.memory_rows,
+                    self.runtime.memory_summary,
+                    self.runtime.memory_covered,
+                    self.settings,
+                    force=True,
+                )
+            except Exception as exc:
+                logger.warning("emergency compaction before overflow retry failed: %s", exc)
+                return False
+            if result is None:
+                return False
+            self.runtime.forced_summary, self.runtime.forced_covered = result
+            return True
 
         try:
             compacted = compact_memory(

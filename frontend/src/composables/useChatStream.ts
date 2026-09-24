@@ -44,8 +44,16 @@ export async function streamChat(
     signal,
   })
 
-  if (!response.ok || !response.body) {
-    throw new Error(`对话请求失败：${response.status} ${response.statusText}`)
+  // 非 2xx 时后端会给出可读的 detail（如韧性快速失败的 503 文案），不要丢弃它。
+  if (!response.ok) {
+    const detail = await response
+      .json()
+      .then((body: { detail?: string }) => body?.detail)
+      .catch(() => undefined)
+    throw new Error(detail ?? `对话请求失败：${response.status} ${response.statusText}`)
+  }
+  if (!response.body) {
+    throw new Error('对话请求失败：响应体为空')
   }
 
   const reader = response.body.getReader()

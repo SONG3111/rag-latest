@@ -133,6 +133,67 @@ def shrink_history(messages: list, token_budget: int) -> list:
     return kept
 
 
+def compute_compaction(
+    rows: list,
+    existing_summary: str | None,
+    covered: int,
+    settings: Settings | None = None,
+    *,
+    summarizer=None,
+    force: bool = False,
+) -> tuple[str, int] | None:
+    """The pure half of ``compact_memory``: decide, fold, return the new bookmark.
+
+    ``rows`` are duck-typed (``.role``/``.content``/``.tool_calls`` — SQLAlchemy
+    Message rows and the stateless chat request's message models both qualify)
+    and are treated read-only: the caller decides where the returned
+    ``(summary, covered_count)`` lands. In the stateless chat deployment that
+    is the internal persist frame handed back to backend-java; in the legacy
+    process it is the ``conversation_summaries`` row, written by the
+    ``compact_memory`` wrapper below. Trigger semantics, gates, and failure
+    behavior are identical to the wrapper — see its docstring.
+    """
+    settings = settings or get_settings()
+    if not rows:
+        return None
+    recent = settings.memory_recent_messages
+
+    keep_budget = settings.memory_keep_recent_tokens
+    if force:
+        keep_budget = max(keep_budget // 2, 1)
+    keep = _keep_boundary(rows, keep_budget, recent)
+    to_compress = rows[:-keep]
+
+    # Count gate: batch old thin turns so the summary call is amortized (the
+    # original watermark). Token gate: pressure is current, it cannot wait for a
+    # batch. Either alone triggers a fold.
+    count_gate = len(rows) > max(recent, settings.memory_compact_trigger)
+    pressure = _token_pressure(existing_summary, rows[covered:], recent, settings)
+    if not (force or count_gate or pressure):
+        # Below both gates the plain truncation the history assembly already
+        # does is indistinguishable from compaction, so don't pay for a summary.
+        return None
+    if len(to_compress) <= covered:
+        # Nothing new beyond the bookmark (force keeps this check: re-folding
+        # covered rows would spend a model call to reproduce the same summary).
+        return None
+
+    prompt = _build_prompt(existing_summary, to_compress)
+    try:
+        summary = (
+            summarizer(prompt) if summarizer is not None else _summarize(settings, prompt)
+        )
+    except Exception as exc:
+        # A broken summarizer must never surface into the caller's turn; the
+        # fallback is simply "no new summary".
+        logger.warning("memory summarization failed: %s", exc)
+        summary = None
+    if not summary:
+        logger.info("memory compaction produced no summary; keeping truncation fallback")
+        return None
+    return summary, len(to_compress)
+
+
 def compact_memory(
     session: Session,
     workspace_id: str,
@@ -151,6 +212,10 @@ def compact_memory(
     summarizer the small rewrite model is used; a failed or empty
     summarization keeps the previous state — the next turn simply falls back
     to truncation.
+
+    Thin wrapper over :func:`compute_compaction` (the shared decision logic):
+    read the DB rows and stored bookmark, run the pure function, write the
+    result back.
     """
     settings = settings or get_settings()
     rows = list(
@@ -163,54 +228,27 @@ def compact_memory(
     if not rows:
         return False
     existing = session.get(ConversationSummary, workspace_id)
-    covered = existing.covered_count if existing else 0
-    recent = settings.memory_recent_messages
-
-    keep_budget = settings.memory_keep_recent_tokens
-    if force:
-        keep_budget = max(keep_budget // 2, 1)
-    keep = _keep_boundary(rows, keep_budget, recent)
-    to_compress = rows[:-keep]
-
-    # Count gate: batch old thin turns so the summary call is amortized (the
-    # original watermark). Token gate: pressure is current, it cannot wait for
-    # a batch. Either alone triggers a fold.
-    count_gate = len(rows) > max(recent, settings.memory_compact_trigger)
-    pressure = _token_pressure(
-        existing.summary if existing else None, rows[covered:], recent, settings
+    result = compute_compaction(
+        rows,
+        existing.summary if existing else None,
+        existing.covered_count if existing else 0,
+        settings,
+        summarizer=summarizer,
+        force=force,
     )
-    if not (force or count_gate or pressure):
-        # Below both gates the plain truncation the history assembly already
-        # does is indistinguishable from compaction, so don't pay for a summary.
+    if result is None:
         return False
-    if len(to_compress) <= covered:
-        # Nothing new beyond the bookmark (force keeps this check: re-folding
-        # covered rows would spend a model call to reproduce the same summary).
-        return False
-
-    prompt = _build_prompt(existing.summary if existing else None, to_compress)
-    try:
-        summary = (
-            summarizer(prompt) if summarizer is not None else _summarize(settings, prompt)
-        )
-    except Exception as exc:
-        # A broken summarizer must never surface into the background task that
-        # calls compaction; the fallback is simply "no new summary".
-        logger.warning("memory summarization failed: %s", exc)
-        summary = None
-    if not summary:
-        logger.info("memory compaction produced no summary; keeping truncation fallback")
-        return False
+    summary, covered_count = result
 
     if existing is None:
         existing = ConversationSummary(workspace_id=workspace_id)
         session.add(existing)
     existing.summary = summary
-    existing.covered_count = len(to_compress)
+    existing.covered_count = covered_count
     session.flush()
     logger.info(
         "compacted %d older messages into the conversation summary of %s",
-        len(to_compress),
+        covered_count,
         workspace_id,
     )
     return True
@@ -250,7 +288,9 @@ def _token_pressure(
 def _build_prompt(previous: str | None, rows: list[Message]) -> str:
     lines: list[str] = []
     for row in rows:
-        role = "用户" if row.role is MessageRole.user else "助手"
+        # == rather than `is`: MessageRole is a str-enum, and compute_compaction
+        # also feeds plain "user"/"assistant"-string request models through here.
+        role = "用户" if row.role == MessageRole.user else "助手"
         content = (row.content or "").strip().replace("\n", " ")
         if not content:
             continue

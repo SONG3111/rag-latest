@@ -49,4 +49,21 @@ public final class Dtos {
             String node, long durationMs, JsonNode input, JsonNode output, String error) {}
 
     public record TraceRunDetail(String runId, java.util.List<TraceNodeRead> nodes) {}
+
+    /** 聊天请求，对齐 python schemas.ChatRequest（min_length=1 / max 8000）。 */
+    public record ChatRequest(
+            @NotBlank @Size(max = 8000) String message) {}
+
+    /** /internal 检索语料的一个 chunk 行（ai-service 的 ChunkRecord 逐字段对应）。 */
+    public record CorpusChunk(
+            String id, String fileId, String parentId, String level, String text,
+            String location, JsonNode meta, JsonNode tokenCounts,
+            int tokenLength, int ordinal) {}
+
+    /** /internal 检索语料响应：files 为 {file_id: rel_path}，chunks 为 children+parents 全量。 */
+    public record CorpusResponse(
+            java.util.Map<String, String> files, java.util.List<CorpusChunk> chunks) {}
+
+    /** 会话滚动摘要（messages 表书签算术的另一半）。 */
+    public record SummaryRow(String summary, int coveredCount) {}
 }

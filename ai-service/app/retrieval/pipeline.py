@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,33 @@ def _open_span(trace, node: str, input_summary: dict[str, Any] | None):
     if trace is None:
         return contextlib.nullcontext({"output": {}, "error": None})
     return trace.span(node, input_summary)
+
+
+@dataclass
+class ChunkRecord:
+    """A chunk row as delivered over the internal retrieval-corpus endpoint.
+
+    The stateless chat deployment moves chunk persistence to backend-java, so
+    the Python side reads the corpus through an HTTP loader instead of the
+    SQLAlchemy ``Chunk`` model. Field names mirror the model's columns, and the
+    retrieval pipeline only ever touches these attributes — which is what lets
+    DB rows and wire records flow through the same code path unchanged.
+    """
+
+    id: str
+    file_id: str
+    parent_id: str | None
+    level: str
+    text: str
+    location: str
+    meta: dict[str, Any] = field(default_factory=dict)
+    token_counts: dict[str, int] = field(default_factory=dict)
+    token_length: int = 0
+    ordinal: int = 0
+
+
+#: (files: {file_id: rel_path}, chunks) — the shape a corpus loader returns.
+Corpus = tuple[dict[str, str], list[ChunkRecord]]
 
 
 @dataclass
@@ -124,6 +152,7 @@ class Retriever:
         reranker=None,
         vector_store: VectorStore | None = None,
         rewriter: QueryRewriter | None = None,
+        corpus_loader: Callable[[], Corpus] | None = None,
     ) -> None:
         self.session = session
         self.workspace_id = workspace_id
@@ -132,6 +161,12 @@ class Retriever:
         self._reranker = reranker
         self._vector_store = vector_store
         self._rewriter = rewriter
+        # Stateful (DB) mode vs stateless (Java-owned persistence) mode: with a
+        # loader, the corpus comes from one internal HTTP call per search and
+        # `session` is never touched. The loader result is memoized for the
+        # retriever's lifetime so children, parents, and the file map share it.
+        self._corpus_loader = corpus_loader
+        self._corpus: Corpus | None = None
         self._warned: set[str] = set()
         self.last_run = RetrievalRun()
 
@@ -175,8 +210,18 @@ class Retriever:
     # ------------------------------------------------------------------ #
     # search
     # ------------------------------------------------------------------ #
-    def _load_children(self) -> list[Chunk]:
+    def _load_corpus(self) -> Corpus:
+        """Fetch (and memoize) the corpus via the injected loader, if any."""
+        if self._corpus is None:
+            files, chunks = self._corpus_loader()
+            self._corpus = (files, list(chunks))
+        return self._corpus
+
+    def _load_children(self) -> list:
         """Retrievable units only. Parents are context carriers, never ranked."""
+        if self._corpus_loader is not None:
+            _, chunks = self._load_corpus()
+            return [chunk for chunk in chunks if chunk.level == "child"]
         return list(
             self.session.scalars(
                 select(Chunk).where(
@@ -189,6 +234,9 @@ class Retriever:
     def _load_parents(self, parent_ids: set[str]) -> dict[str, Chunk]:
         if not parent_ids:
             return {}
+        if self._corpus_loader is not None:
+            _, chunks = self._load_corpus()
+            return {chunk.id: chunk for chunk in chunks if chunk.id in parent_ids}
         rows = self.session.scalars(
             select(Chunk).where(Chunk.id.in_(parent_ids))
         )
@@ -365,12 +413,17 @@ class Retriever:
         )
         run.threshold_applied = threshold if gate_active else None
 
-        files = {
-            file.id: file.rel_path
-            for file in self.session.scalars(
-                select(DocumentFile).where(DocumentFile.workspace_id == self.workspace_id)
-            )
-        }
+        if self._corpus_loader is not None:
+            files, _ = self._load_corpus()
+        else:
+            files = {
+                file.id: file.rel_path
+                for file in self.session.scalars(
+                    select(DocumentFile).where(
+                        DocumentFile.workspace_id == self.workspace_id
+                    )
+                )
+            }
 
         selected: list[tuple[str, float]] = []
         for position, chunk_id in enumerate(order[: max(top_k, len(order))]):

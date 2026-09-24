@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.config.RagProperties;
+import com.raglatest.backend.config.ResilienceConfig;
 import com.raglatest.backend.internal.AiServiceClient;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -25,7 +26,7 @@ import org.springframework.test.web.servlet.MockMvc;
  * 契约与原 Python 版保持一致，前端与 docker healthcheck 依赖它。
  */
 @WebMvcTest(HealthController.class)
-@Import(AiServiceClient.class)
+@Import({AiServiceClient.class, ResilienceConfig.class})
 @EnableConfigurationProperties(RagProperties.class)
 class HealthControllerUpTests {
 

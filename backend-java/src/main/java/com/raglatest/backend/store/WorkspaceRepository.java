@@ -51,9 +51,11 @@ public class WorkspaceRepository {
     }
 
     public boolean exists(String workspaceId) {
-        return Boolean.TRUE.equals(jdbc.sql("SELECT COUNT(*) FROM workspaces WHERE id = :id")
+        Long count = jdbc.sql("SELECT COUNT(*) FROM workspaces WHERE id = :id")
                 .param("id", workspaceId)
-                .query(Long.class).single());
+                .query(Long.class)
+                .single();
+        return count != null && count > 0;
     }
 
     public WorkspaceRead create(String name, String description) {

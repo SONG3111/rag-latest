@@ -37,6 +37,25 @@ public class MessageRepository {
         return newestFirst.reversed();
     }
 
+    /** 全量消息数：covered 书签算术用（超过请求封顶时与 messages 列表长度不一致）。 */
+    public long countAll(String workspaceId) {
+        return jdbc.sql("SELECT COUNT(*) FROM messages WHERE workspace_id = :ws")
+                .param("ws", workspaceId)
+                .query(Long.class)
+                .single();
+    }
+
+    /** 最新一条消息的时间（stale files 的 cutoff；无消息时为 null）。 */
+    public java.time.Instant latestCreatedAt(String workspaceId) {
+        Timestamp latest = jdbc.sql(
+                        "SELECT MAX(created_at) FROM messages WHERE workspace_id = :ws")
+                .param("ws", workspaceId)
+                .query((rs, i) -> rs.getTimestamp(1))
+                .optional()
+                .orElse(null);
+        return latest == null ? null : latest.toInstant();
+    }
+
     public Optional<MessageRead> findInWorkspace(String workspaceId, String messageId) {
         return jdbc.sql("""
                         SELECT id, role, content, tool_calls, citations, feedback, created_at

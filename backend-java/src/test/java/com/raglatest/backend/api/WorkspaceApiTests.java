@@ -230,8 +230,14 @@ class WorkspaceApiTests {
     @Test
     void messagesListIsChronologicalAndHonorsLimit() {
         String ws = createWorkspace("消息");
+        // created_at 毫秒精度：紧邻插入会同毫秒，排序退化到随机 id。隔开插入，
+        // 让时间序成为唯一决定因素（本用例钉的就是时间序语义）。
         messages.insert(ws, "user", "第一条", null, null);
+        org.assertj.core.api.Assertions
+                .assertThatCode(() -> Thread.sleep(5)).doesNotThrowAnyException();
         messages.insert(ws, "assistant", "第二条", null, null);
+        org.assertj.core.api.Assertions
+                .assertThatCode(() -> Thread.sleep(5)).doesNotThrowAnyException();
         messages.insert(ws, "user", "第三条", null, null);
 
         ResponseEntity<String> all = rest.getForEntity(

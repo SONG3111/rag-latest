@@ -29,6 +29,23 @@ rag:
     request-timeout: 30s
     # 与 ai-service 的 CHAT_TURN_TIMEOUT 对齐（原 Python 版 300s）。
     chat-turn-timeout: ${CHAT_TURN_TIMEOUT:300s}
+  # 韧性容错：Java→ai-service 边界的熔断与聊天回合舱壁。
+  # 重试/并发限制走 Spring Framework 7 原生注解（@Retryable/@ConcurrencyLimit），不在此配置。
+  resilience:
+    # 读路径熔断；聊天回合用专用配置（关闭慢调用判定），见 ResilienceConfig。
+    circuit-breaker:
+      failure-rate-threshold: ${RAG_CB_FAILURE_RATE:50}
+      sliding-window-size: ${RAG_CB_WINDOW:20}
+      # 口径是“尝试数”（重试在熔断内层）：读接口一次逻辑调用最多 1+2 次，
+      # 5 约合 2 次逻辑失败即开闸（有意的快速保护）。
+      minimum-number-of-calls: ${RAG_CB_MIN_CALLS:5}
+      wait-duration-in-open-state: ${RAG_CB_OPEN_WAIT:15s}
+      permitted-number-of-calls-in-half-open-state: ${RAG_CB_HALF_OPEN_CALLS:3}
+      slow-call-duration-threshold: ${RAG_CB_SLOW_CALL:10s}
+      slow-call-rate-threshold: ${RAG_CB_SLOW_RATE:80}
+    bulkhead:
+      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:2}
+      chat-max-wait-duration: ${RAG_BULKHEAD_CHAT_WAIT:0s}
 
 logging:
   level:
