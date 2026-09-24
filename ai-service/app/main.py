@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.internal import router as internal_router
 from .api.routes import router
 from .config import get_settings
 from .db import init_db
@@ -69,6 +70,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+    # 内部契约：仅 backend-java（内网）调用，不对前端暴露。
+    app.include_router(internal_router)
 
     @app.get("/health")
     def health() -> dict:

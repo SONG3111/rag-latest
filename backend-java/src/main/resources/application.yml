@@ -1,9 +1,20 @@
 spring:
   application:
     name: rag-backend
+  jackson:
+    # 对外契约沿袭 Python 版的 snake_case（file_count/rel_path/created_at...）。
+    property-naming-strategy: SNAKE_CASE
   datasource:
     url: jdbc:sqlite:${rag.data-dir}/app.db
     driver-class-name: org.sqlite.JDBC
+    hikari:
+      # 对齐 Python 版连接 pragma：WAL + busy_timeout=30s + 外键级联。
+      # 经 Hikari 的 driver-properties 传给 sqlite-jdbc，每条连接生效。
+      maximum-pool-size: 4
+      data-source-properties:
+        journal_mode: "WAL"
+        busy_timeout: "30000"
+        foreign_keys: "true"
 
 server:
   port: 8000

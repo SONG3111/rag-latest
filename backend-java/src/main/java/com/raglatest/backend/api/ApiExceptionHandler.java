@@ -1,0 +1,65 @@
+package com.raglatest.backend.api;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
+
+/**
+ * 错误响应保持 FastAPI HTTPException 的形状 {"detail": "..."}，
+ * 前端按非 2xx + detail 文本提示。
+ */
+@RestControllerAdvice
+public class ApiExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+    private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
+
+    @ExceptionHandler(ApiException.class)
+    public ResponseEntity<ObjectNode> apiException(ApiException ex) {
+        return ResponseEntity.status(ex.status()).body(detail(ex.getMessage()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ObjectNode> validation(MethodArgumentNotValidException ex) {
+        String message = ex.getBindingResult().getFieldErrors().stream()
+                .findFirst()
+                .map(error -> error.getField() + ": " + error.getDefaultMessage())
+                .orElse("invalid request");
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(detail(message));
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ObjectNode> uploadTooLarge(MaxUploadSizeExceededException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(detail("file exceeds the upload limit"));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ObjectNode> unexpected(Exception ex) {
+        log.error("unhandled error", ex);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(detail("internal error: " + ex.getMessage()));
+    }
+
+    private ObjectNode detail(String message) {
+        ObjectNode body = JSON.objectNode();
+        body.put("detail", message);
+        return body;
+    }
+
+    /** ai-service 错误体的 detail 提取辅助。 */
+    public static String extractDetail(JsonNode errorBody, String fallback) {
+        if (errorBody != null && errorBody.hasNonNull("detail")) {
+            return errorBody.get("detail").asText();
+        }
+        return fallback;
+    }
+}
