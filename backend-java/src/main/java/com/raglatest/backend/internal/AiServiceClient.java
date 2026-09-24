@@ -193,11 +193,29 @@ public class AiServiceClient {
         return new ApiException(resolved != null ? resolved : HttpStatus.BAD_GATEWAY, detail);
     }
 
-    /** 沿 cause 链判断是否为瞬时故障（连接重置/超时最终都是 IOException 或 TimeoutException）。 */
-    private static boolean isTransient(Throwable ex) {
+    /**
+     * 判定是否为可重试的瞬时故障。
+     *
+     * <p>连接建立/重置类与服务端超时可重试（IOException / TimeoutException，
+     * 含 ConnectException、Netty 的 ConnectTimeoutException、PrematureCloseException
+     * 与 block 读超时的 TimeoutException）；DNS 解析失败与 TLS 握手失败重试无意义，
+     * 显式排除，不占用读路径的重试预算。</p>
+     *
+     * <p>包级可见：供分类回归单测直接调用。</p>
+     */
+    static boolean isTransient(Throwable ex) {
+        if (causedBy(ex, java.net.UnknownHostException.class)
+                || causedBy(ex, javax.net.ssl.SSLException.class)) {
+            return false;
+        }
+        return causedBy(ex, java.io.IOException.class)
+                || causedBy(ex, java.util.concurrent.TimeoutException.class);
+    }
+
+    /** 沿 cause 链查是否出现某类型（自环即止，避免异常链异常时死循环）。 */
+    private static boolean causedBy(Throwable ex, Class<? extends Throwable> type) {
         for (Throwable current = ex; current != null; current = current.getCause()) {
-            if (current instanceof java.io.IOException
-                    || current instanceof java.util.concurrent.TimeoutException) {
+            if (type.isInstance(current)) {
                 return true;
             }
             if (current.getCause() == current) {

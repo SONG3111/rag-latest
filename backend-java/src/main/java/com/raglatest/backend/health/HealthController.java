@@ -1,6 +1,8 @@
 package com.raglatest.backend.health;
 
 import com.raglatest.backend.internal.AiServiceClient;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,9 +42,23 @@ public class HealthController {
             log.warn("ai-service health check failed: {}", ex.getMessage());
             body.put("ai_service", "down");
             body.put("mcp_started", false);
-            body.put("mcp_error", "ai-service unreachable: " + ex.getMessage());
+            body.put("mcp_error", describeDegraded(ex));
             body.put("tools", 0);
         }
         return body;
+    }
+
+    /**
+     * 降级文案区分“被韧性策略拦截”与“真正不可达”：熔断打开/并发拒绝时服务可能仍健康，
+     * 若统一写“unreachable”会误导排障。仍返回 200 + 降级字段，前端契约不变。
+     */
+    private static String describeDegraded(Exception ex) {
+        if (ex instanceof CallNotPermittedException
+                || ex instanceof BulkheadFullException
+                || ex instanceof org.springframework.resilience.InvocationRejectedException) {
+            return "ai-service gated by resilience policy (circuit breaker / concurrency limit): "
+                    + ex.getMessage();
+        }
+        return "ai-service unreachable: " + ex.getMessage();
     }
 }

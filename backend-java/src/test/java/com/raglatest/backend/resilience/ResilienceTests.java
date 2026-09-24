@@ -330,6 +330,17 @@ class ResilienceTests {
         assertThat(chat().getState()).isEqualTo(CircuitBreaker.State.CLOSED);
     }
 
+    @Test
+    void healthDistinguishesCircuitGateFromUnreachable() {
+        reads().transitionToOpenState();
+        ResponseEntity<String> response = rest.getForEntity("/health", String.class);
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        var body = JsonPath.parse(response.getBody());
+        assertThat(body.read("$.ai_service", String.class)).isEqualTo("down");
+        // 熔断打开时服务可能仍健康：降级文案不得写“unreachable”。
+        assertThat(body.read("$.mcp_error", String.class)).contains("circuit breaker");
+    }
+
     // ------------------------------------------------------------------ //
     // 状态端点
     // ------------------------------------------------------------------ //
