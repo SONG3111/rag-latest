@@ -13,7 +13,7 @@
 | M1 数据层 + CRUD + 内部 /v1 接缝 | ✅ 完成 | `078d7ee` |
 | M2 聊天链路（无状态化 + SSE 中继） | ✅ 完成 | `cd5720e` |
 | M3 审批全链路 + 索引编排 | ✅ 完成 | `a2cc765` |
-| M4 退役旧代码 + 文档 | ✅ 完成 | `7610ee9` |
+| M4 退役旧代码 + 文档 | ✅ 完成 | `f81181c` |
 
 当前分支 `feat/java-backend`（基于 `dev`）。M4 退役后三套件状态：
 **backend-java 83 用例全绿；ai-service 165 用例全绿（删 7 个旧 REST 套件文件后迁移
@@ -320,4 +320,4 @@ check_proxy_bypass/test_chunking_live。
 M3 + 韧性容错层已提交并推送（`a2cc765`）。当前未提交改动 = **M4 全部内容**
 （见 §四 M4 清单：app 层删除与收敛、11 个测试文件无状态化迁移、scripts 处置、
 文档更新）。三套件回归全绿：backend-java 83 / ai-service 165 / mcp-office-server 170。
-提交 `7610ee9`，迁移四个里程碑全部落地。
+提交 `f81181c`，迁移四个里程碑全部落地。
