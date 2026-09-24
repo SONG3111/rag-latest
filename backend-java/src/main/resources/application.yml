@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: rag-backend
+  datasource:
+    url: jdbc:sqlite:${rag.data-dir}/app.db
+    driver-class-name: org.sqlite.JDBC
+
+server:
+  port: 8000
+
+rag:
+  # 本地开发从仓库根目录启动（README 命令），与 Python 版默认的 ./data 对齐；
+  # Docker 里由 compose 注入 DATA_DIR=/app/data。
+  data-dir: ${DATA_DIR:./data}
+  cors-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  ai-service:
+    base-url: ${AI_SERVICE_URL:http://127.0.0.1:8001}
+    request-timeout: 30s
+    # 与 ai-service 的 CHAT_TURN_TIMEOUT 对齐（原 Python 版 300s）。
+    chat-turn-timeout: ${CHAT_TURN_TIMEOUT:300s}
+
+logging:
+  level:
+    com.raglatest: INFO

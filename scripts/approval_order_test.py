@@ -18,7 +18,7 @@ SRC = ROOT / "data" / "workspaces" / "9871b0b0d2894b71949cbf293d13e82b" / "01-äº
 STATE_DIR = ROOT / "data" / "approval_order_test"
 BASE = "http://localhost:8000/api"
 
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 
 client = httpx.Client(base_url=BASE, trust_env=False, timeout=600.0)
 

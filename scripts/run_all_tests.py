@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
+BACKEND_JAVA_DIR = PROJECT_ROOT / "backend-java"
+WRAPPER_JAR = BACKEND_JAVA_DIR / ".mvn" / "wrapper" / "maven-wrapper.jar"
 
 
 def run_backend_pytest() -> int:
@@ -34,6 +37,26 @@ def run_backend_pytest() -> int:
     completed = subprocess.run(
         [sys.executable, "-m", "pytest"],
         cwd=PROJECT_ROOT / "backend",
+        shell=False,
+    )
+    return completed.returncode
+
+
+def run_java_tests() -> int:
+    """Java business backend. Runs the pinned Maven through its wrapper jar
+    (pure ``java -cp``, list-argv, no shell); needs a JDK 17+."""
+    if not WRAPPER_JAR.exists():
+        print("backend-java/.mvn/wrapper/maven-wrapper.jar missing; cannot run Maven")
+        return 1
+    completed = subprocess.run(
+        [
+            "java",
+            "-cp",
+            str(WRAPPER_JAR),
+            "org.apache.maven.wrapper.MavenWrapperMain",
+            "test",
+        ],
+        cwd=BACKEND_JAVA_DIR,
         shell=False,
     )
     return completed.returncode
@@ -60,7 +83,8 @@ def run_frontend_check(script_name: str) -> int:
 
 
 SUITES = [
-    ("backend", run_backend_pytest),
+    ("ai-service", run_backend_pytest),
+    ("backend-java", run_java_tests),
     ("mcp-server", run_mcp_server_pytest),
 ]
 

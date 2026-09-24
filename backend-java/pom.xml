@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  业务后端（Java 侧）。职责：对前端的 REST/SSE 端点、SQLite 独占读写与增量迁移、
+  工作区/文件/消息/提案状态机等业务逻辑；AI 能力（agent、检索、嵌入、MCP 子进程）
+  一律经内部 HTTP 委托给 ai-service（FastAPI，8001，仅内网）。
+  设计取舍见 docs/（未采用 JPA/Flyway，与原 Python 版 migrations.py 的轻量决策保持一致）。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.raglatest</groupId>
+  <artifactId>backend-java</artifactId>
+  <version>0.1.0</version>
+  <name>rag-backend</name>
+  <description>业务后端：REST/SSE 网关 + SQLite 持久化，AI 委托 ai-service</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <sqlite-jdbc.version>3.53.4.0</sqlite-jdbc.version>
+    <wiremock.version>3.13.2</wiremock.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>${sqlite-jdbc.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- 仅取 WebClient 做 SSE 中继，不引入 reactive server（应用仍是 MVC）。 -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-webflux</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.projectreactor.netty</groupId>
+      <artifactId>reactor-netty-http</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Boot 4 模块化后 @WebMvcTest 切片独立成模块（@WebMvcTest 在
+         org.springframework.boot.webmvc.test.autoconfigure）。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- standalone 版避免与 Boot 4 自带 Jetty 版本冲突；测试里充当 ai-service 桩。 -->
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock-standalone</artifactId>
+      <version>${wiremock.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

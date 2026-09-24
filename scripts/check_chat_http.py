@@ -114,8 +114,8 @@ def main() -> int:
                 "--port",
                 str(PORT),
             ],
-            cwd=ROOT / "backend",
-            env={**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONIOENCODING": "utf-8"},
+            cwd=ROOT / "ai-service",
+            env={**os.environ, "PYTHONPATH": str(ROOT / "ai-service"), "PYTHONIOENCODING": "utf-8"},
             stdout=log,
             stderr=subprocess.STDOUT,
         )

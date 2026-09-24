@@ -36,7 +36,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 _rerank_lock = threading.Lock()
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 PROMPT = """你是一个严谨的中文问答助手。只根据下面的资料回答问题；如果资料里没有答案，就回答"资料中没有相关信息"。

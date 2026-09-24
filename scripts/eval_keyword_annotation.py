@@ -39,7 +39,7 @@ from pathlib import Path
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 KEYWORD_MARK = "\n关键词："

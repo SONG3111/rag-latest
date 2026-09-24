@@ -177,21 +177,28 @@ huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir C:/code/agent/rag/m
 > `EMBEDDING_DIMENSIONS` 必须与模型实际输出维度一致。bge-m3 是 1024 维；
 > 换成 `bge-large-zh-v1.5` 则需要改成 1024 也可以，但若是别的模型请先跑上面的脚本确认。
 
-### 3. 启动后端
+### 3. 启动后端（AI 服务 + Java 业务后端）
+
+后端拆成两个进程：`ai-service/`（FastAPI，AI 能力 + MCP 子进程，端口 8001，仅内网）
+和 `backend-java/`（Spring Boot，业务端点与 SQLite，端口 8000，唯一对前端）。
 
 ```bash
-# 用独立环境（推荐 Python 3.12）
+# Python AI 服务（推荐 Python 3.12；需要 JDK 21+ 跑 Java 侧）
 conda create -p .venv312 python=3.12 -y
-./.venv312/python.exe -m pip install -r backend/requirements.txt
+./.venv312/python.exe -m pip install -r ai-service/requirements.txt
 ./.venv312/python.exe -m pip install -e ./mcp-office-server
 
-# 启动（Windows）
-$env:PYTHONPATH = "backend"; ./.venv312/python.exe -m uvicorn app.main:app --reload
+# 启动 AI 服务（Windows）
+$env:PYTHONPATH = "ai-service"; ./.venv312/python.exe -m uvicorn app.main:app --reload --port 8001
 # macOS / Linux
-# PYTHONPATH=backend .venv312/bin/python -m uvicorn app.main:app --reload
+# PYTHONPATH=ai-service .venv312/bin/python -m uvicorn app.main:app --reload --port 8001
+
+# 另开一个终端，启动 Java 业务后端（从仓库根目录跑，Maven wrapper 会自动拉 Maven）
+cd backend-java && ./mvnw spring-boot:run   # Windows 用 mvnw.cmd
 ```
 
-后端跑在 `http://127.0.0.1:8000`，接口文档在 `/docs`，健康检查在 `/health`。
+对外端点是 Java 后端 `http://127.0.0.1:8000`（健康检查 `/health`，会聚合
+ai-service 状态）；AI 服务在 `http://127.0.0.1:8001` 只接受 Java 后端的内部调用。
 
 ### 4. 启动前端
 
@@ -242,14 +249,16 @@ python scripts/make_demo_data.py
 │   │   ├── word_ops.py       # python-docx 实现层（含跨 run 替换）
 │   │   └── errors.py         # 统一错误语义
 │   └── tests/
-├── backend/
+├── ai-service/               # Python AI 服务（内网 8001）：agent / 检索 / 嵌入 / MCP 子进程
 │   ├── app/
 │   │   ├── agent/graph.py    # LangGraph 图 + 工具门控
 │   │   ├── mcp_client.py     # MCP 子进程生命周期 + 注解解析
-│   │   ├── retrieval/        # 分块 / BM25 / 向量库 / RRF 管线
-│   │   ├── services/         # 文件入库、备份、审批操作
-│   │   └── api/routes.py     # REST + SSE
+│   │   ├── llm/              # 模型 provider + 熔断/回退
+│   │   └── retrieval/        # 分块 / BM25 / 向量库 / RRF 管线
 │   └── tests/
+├── backend-java/             # Java 业务后端（对外 8000）：REST/SSE 网关 + SQLite 独占
+│   ├── src/main/java/…/      # 工作区/文件/消息/提案状态机、迁移、SSE 中继
+│   └── src/test/java/…/      # JUnit5 + WireMock（桩掉 ai-service，不调模型）
 ├── frontend/src/             # Vue 三栏界面
 └── scripts/                  # 演示数据、检索评测、冒烟脚本
 ```
@@ -292,11 +301,17 @@ cd frontend && npm run check:sse && npm run check:sse:live
 # MCP 服务：沙箱与文档读写
 ./.venv312/python.exe -m pytest mcp-office-server/tests -q
 
-# 后端：检索、审批闭环、Agent 门控、HTTP 端到端
-./.venv312/python.exe -m pytest backend/tests -q
+# AI 服务：检索、Agent 门控、内部端点（fake LLM，不调真实模型）
+./.venv312/python.exe -m pytest ai-service/tests -q
+
+# Java 业务后端：CRUD、SSE 中继与落库（WireMock 桩掉 ai-service）
+cd backend-java && ./mvnw test    # Windows 用 mvnw.cmd
+
+# 一键全跑（含上述三个套件）
+./.venv312/python.exe scripts/run_all_tests.py
 
 # 本地模型专项（需权重存在，会加载真实模型，较慢）
-./.venv312/python.exe -m pytest backend/tests/test_local_providers.py -q -m slow
+./.venv312/python.exe -m pytest ai-service/tests/test_local_providers.py -q -m slow
 ```
 
 覆盖的关键场景：
