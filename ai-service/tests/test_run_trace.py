@@ -1,9 +1,9 @@
 """Regression tests for run-level tracing (docs/05 §4.1).
 
 Pins: the collector's span mechanics (timing, error capture, clamping), the
-retrieval pipeline's per-stage spans, the trace rows that survive a whole SSE
-turn, and the read-back endpoints used to answer "why did this turn go wrong".
-No provider is contacted anywhere (AGENTS.md: mock-only tests).
+retrieval pipeline's per-stage spans, and the trace records that ride a whole
+SSE turn out on the persist frame (backend-java persists them into
+``run_traces``). No provider is contacted anywhere (AGENTS.md: mock-only tests).
 """
 
 from __future__ import annotations
@@ -14,8 +14,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 
-from app.models import RunTrace
-from app.services.tracing import TraceCollector, persist_traces
+from app.services.tracing import TraceCollector
 
 pytestmark = pytest.mark.anyio
 
@@ -67,35 +66,28 @@ def test_unserializable_values_do_not_break_the_summary():
 # --------------------------------------------------------------------------- #
 # retrieval pipeline spans
 # --------------------------------------------------------------------------- #
-def test_search_records_the_stage_spans(temp_session):
-    from app.models import Chunk, DocumentFile, Workspace
+def test_search_records_the_stage_spans():
     from app.retrieval.bm25 import tokenize
-    from app.retrieval.pipeline import Retriever
+    from app.retrieval.pipeline import ChunkRecord, Retriever
 
-    workspace = Workspace(name="检索埋点")
-    temp_session.add(workspace)
-    temp_session.flush()
-    file = DocumentFile(workspace_id=workspace.id, rel_path="表.xlsx", kind="excel")
-    temp_session.add(file)
-    temp_session.flush()
     text = "单笔报销不得超过 5000 元"
     counts: dict[str, int] = {}
     for token in tokenize(text):
         counts[token] = counts.get(token, 0) + 1
-    temp_session.add(
-        Chunk(
-            workspace_id=workspace.id,
-            file_id=file.id,
-            text=text,
-            location="费用!第2行",
-            token_counts=counts,
-            token_length=sum(counts.values()),
-        )
+    chunk = ChunkRecord(
+        id="c1",
+        file_id="f1",
+        parent_id=None,
+        level="child",
+        text=text,
+        location="费用!第2行",
+        token_counts=counts,
+        token_length=sum(counts.values()),
     )
-    temp_session.flush()
+    corpus = ({"f1": "表.xlsx"}, [chunk])
 
-    collector = TraceCollector(workspace.id, run_id="run-ret")
-    retriever = Retriever(temp_session, workspace.id)
+    collector = TraceCollector("ws-ret", run_id="run-ret")
+    retriever = Retriever("ws-ret", corpus_loader=lambda: corpus)
     # A token straight from the document guarantees the BM25 leg fires.
     retriever.search(next(iter(counts)), use_dense=False, use_rewrite=False, trace=collector)
 
@@ -106,7 +98,7 @@ def test_search_records_the_stage_spans(temp_session):
 
 
 # --------------------------------------------------------------------------- #
-# end-to-end: a chat turn persists its trace and reports the run id
+# end-to-end: a chat turn reports its trace records on the persist frame
 # --------------------------------------------------------------------------- #
 class ScriptedLLM:
     def __init__(self, script: list[AIMessage]) -> None:
@@ -135,19 +127,15 @@ def parse_sse_frames(body: str) -> list[tuple[str, dict]]:
     return frames
 
 
-async def test_chat_turn_writes_trace_rows_and_reports_run_id(
+async def test_chat_turn_reports_trace_records_on_the_persist_frame(
     app_with_temp_storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The turn's trace rows land in the DB and the run id comes back in `done`.
+    """The turn's trace rows ride the persist frame for backend-java to store.
 
-    Background tasks normally write through ``session_scope`` (the app's real
-    database), which is deliberately inert under test — this test redirects it
-    to the throwaway factory so the written rows can be read back through the
-    trace endpoints.
+    The stateless endpoint no longer writes ``run_traces`` itself; the persist
+    frame carries the collector's records (Java persists them keyed by the same
+    run id it generated for the request).
     """
-    import contextlib
-
-    import app.api.routes as routes_module
     from app.llm import providers
 
     monkeypatch.setattr(
@@ -156,65 +144,24 @@ async def test_chat_turn_writes_trace_rows_and_reports_run_id(
         lambda settings: ScriptedLLM([AIMessage(content="工作区里只有一个文件。")]),
     )
 
-    @contextlib.contextmanager
-    def test_session_scope():
-        session = app_with_temp_storage.state.test_session_factory()
-        try:
-            yield session
-            session.commit()
-        finally:
-            session.close()
-
-    monkeypatch.setattr(routes_module, "session_scope", test_session_scope)
-
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "轨迹"})
-            ).json()["id"]
             response = await client.post(
-                f"/api/workspaces/{workspace_id}/chat/stream",
-                json={"message": "工作区里有什么文件"},
+                "/v1/chat/stream",
+                json={
+                    "workspace_id": "ws-trace",
+                    "run_id": "run-trace-0001",
+                    "message": "工作区里有什么文件",
+                },
             )
             frames = parse_sse_frames(response.text)
 
-            done = next(payload for name, payload in frames if name == "done")
-            assert done["run_id"]
-
-            # The background task ran with the response; the rows are readable.
-            runs = (await client.get(f"/api/workspaces/{workspace_id}/traces")).json()
-            assert [run["run_id"] for run in runs] == [done["run_id"]]
-
-            detail = (
-                await client.get(
-                    f"/api/workspaces/{workspace_id}/traces/{done['run_id']}"
-                )
-            ).json()
-            nodes = [node["node"] for node in detail["nodes"]]
+            persist = next(payload for name, payload in frames if name == "persist")
+            nodes = [node["node"] for node in persist["trace_nodes"]]
             assert "agent" in nodes
-            agent_node = next(node for node in detail["nodes"] if node["node"] == "agent")
-            assert agent_node["output"]["text_chars"] > 0
-
-            unknown = await client.get(
-                f"/api/workspaces/{workspace_id}/traces/no-such-run"
+            agent_node = next(
+                node for node in persist["trace_nodes"] if node["node"] == "agent"
             )
-            assert unknown.status_code == 404
-
-
-def test_persist_traces_writes_rows(temp_session):
-    from app.models import Workspace
-
-    workspace = Workspace(name="落库")
-    temp_session.add(workspace)
-    temp_session.flush()
-
-    collector = TraceCollector(workspace.id, run_id="run-db")
-    with collector.span("agent", {"prompt": "q"}) as span:
-        span["output"] = {"text_chars": 2}
-    assert persist_traces(temp_session, collector) == 1
-
-    row = temp_session.query(RunTrace).one()
-    assert row.run_id == "run-db" and row.node == "agent"
-    assert row.input == {"prompt": "q"} and row.output == {"text_chars": 2}
+            assert agent_node["output"]["text_chars"] > 0

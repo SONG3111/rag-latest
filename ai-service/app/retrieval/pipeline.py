@@ -33,11 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from ..config import Settings, get_settings
-from ..models import Chunk, DocumentFile
 from .bm25 import BM25Index, content_fingerprint, reciprocal_rank_fusion
 from .rewriter import QueryRewriter
 from .vector_store import VectorStore
@@ -63,11 +59,10 @@ def _open_span(trace, node: str, input_summary: dict[str, Any] | None):
 class ChunkRecord:
     """A chunk row as delivered over the internal retrieval-corpus endpoint.
 
-    The stateless chat deployment moves chunk persistence to backend-java, so
-    the Python side reads the corpus through an HTTP loader instead of the
-    SQLAlchemy ``Chunk`` model. Field names mirror the model's columns, and the
-    retrieval pipeline only ever touches these attributes — which is what lets
-    DB rows and wire records flow through the same code path unchanged.
+    backend-java owns chunk persistence; the corpus always arrives through the
+    injected loader (one internal HTTP call per search). Field names mirror the
+    database columns, and the retrieval pipeline only ever touches these
+    attributes.
     """
 
     id: str
@@ -144,7 +139,6 @@ class RetrievalRun:
 class Retriever:
     def __init__(
         self,
-        session: Session,
         workspace_id: str,
         settings: Settings | None = None,
         *,
@@ -152,18 +146,16 @@ class Retriever:
         reranker=None,
         vector_store: VectorStore | None = None,
         rewriter: QueryRewriter | None = None,
-        corpus_loader: Callable[[], Corpus] | None = None,
+        corpus_loader: Callable[[], Corpus],
     ) -> None:
-        self.session = session
         self.workspace_id = workspace_id
         self.settings = settings or get_settings()
         self._embeddings = embeddings
         self._reranker = reranker
         self._vector_store = vector_store
         self._rewriter = rewriter
-        # Stateful (DB) mode vs stateless (Java-owned persistence) mode: with a
-        # loader, the corpus comes from one internal HTTP call per search and
-        # `session` is never touched. The loader result is memoized for the
+        # The corpus comes from one internal HTTP call per search (served by
+        # Java's retrieval-corpus endpoint). The result is memoized for the
         # retriever's lifetime so children, parents, and the file map share it.
         self._corpus_loader = corpus_loader
         self._corpus: Corpus | None = None
@@ -211,39 +203,25 @@ class Retriever:
     # search
     # ------------------------------------------------------------------ #
     def _load_corpus(self) -> Corpus:
-        """Fetch (and memoize) the corpus via the injected loader, if any."""
+        """Fetch (and memoize) the corpus via the injected loader."""
         if self._corpus is None:
             files, chunks = self._corpus_loader()
             self._corpus = (files, list(chunks))
         return self._corpus
 
-    def _load_children(self) -> list:
+    def _load_children(self) -> list[ChunkRecord]:
         """Retrievable units only. Parents are context carriers, never ranked."""
-        if self._corpus_loader is not None:
-            _, chunks = self._load_corpus()
-            return [chunk for chunk in chunks if chunk.level == "child"]
-        return list(
-            self.session.scalars(
-                select(Chunk).where(
-                    Chunk.workspace_id == self.workspace_id,
-                    Chunk.level == "child",
-                )
-            )
-        )
+        _, chunks = self._load_corpus()
+        return [chunk for chunk in chunks if chunk.level == "child"]
 
-    def _load_parents(self, parent_ids: set[str]) -> dict[str, Chunk]:
+    def _load_parents(self, parent_ids: set[str]) -> dict[str, ChunkRecord]:
         if not parent_ids:
             return {}
-        if self._corpus_loader is not None:
-            _, chunks = self._load_corpus()
-            return {chunk.id: chunk for chunk in chunks if chunk.id in parent_ids}
-        rows = self.session.scalars(
-            select(Chunk).where(Chunk.id.in_(parent_ids))
-        )
-        return {row.id: row for row in rows}
+        _, chunks = self._load_corpus()
+        return {chunk.id: chunk for chunk in chunks if chunk.id in parent_ids}
 
     @staticmethod
-    def _dedupe(ranked_ids: list[str], by_id: dict[str, Chunk]) -> list[str]:
+    def _dedupe(ranked_ids: list[str], by_id: dict[str, ChunkRecord]) -> list[str]:
         """Collapse passages that appear more than once, keeping the best position.
 
         A passage surfaced by both legs is normal; letting it consume two of the
@@ -413,17 +391,7 @@ class Retriever:
         )
         run.threshold_applied = threshold if gate_active else None
 
-        if self._corpus_loader is not None:
-            files, _ = self._load_corpus()
-        else:
-            files = {
-                file.id: file.rel_path
-                for file in self.session.scalars(
-                    select(DocumentFile).where(
-                        DocumentFile.workspace_id == self.workspace_id
-                    )
-                )
-            }
+        files, _ = self._load_corpus()
 
         selected: list[tuple[str, float]] = []
         for position, chunk_id in enumerate(order[: max(top_k, len(order))]):

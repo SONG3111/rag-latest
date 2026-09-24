@@ -1,4 +1,9 @@
-"""FastAPI application entry point."""
+"""FastAPI application entry point.
+
+Runtime-only since the Java-backend split (M4): backend-java owns persistence
+and every public endpoint; this process serves the internal ``/v1`` contract
+(tools / preview / index / chat-stream) and ``/health``.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.internal import router as internal_router
 from .api.internal_chat import router as internal_chat_router
-from .api.routes import router
 from .config import get_settings
-from .db import init_db
 from .mcp_client import McpOfficeClient, McpStartupError
 
 logging.basicConfig(
@@ -26,9 +29,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_directories()
-    init_db()
-    logger.info("database ready at %s", settings.effective_database_url)
-    _warn_about_legacy_chunks()
 
     client = McpOfficeClient(settings)
     try:
@@ -55,10 +55,10 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="工作区文档 Agent",
+        title="工作区文档 Agent（AI 运行时）",
         description=(
-            "面向本地工作区的文档 Agent：对话式修改 Excel/Word，"
-            "并通过知识库检索回答文档相关问题。"
+            "面向本地工作区的文档 Agent 运行时：agent 编排、检索、嵌入与 MCP 子进程。"
+            "对外端点由 backend-java 提供，本服务仅暴露内部 /v1 契约。"
         ),
         version="0.1.0",
         lifespan=lifespan,
@@ -70,7 +70,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(router)
     # 内部契约：仅 backend-java（内网）调用，不对前端暴露。
     app.include_router(internal_router)
     app.include_router(internal_chat_router)
@@ -86,29 +85,6 @@ def create_app() -> FastAPI:
         }
 
     return app
-
-
-def _warn_about_legacy_chunks() -> None:
-    """Point operators at the rebuild endpoint when chunks predate the hierarchy."""
-    from sqlalchemy.exc import SQLAlchemyError
-
-    from .db import session_scope
-    from .services.files import legacy_chunk_workspaces
-
-    try:
-        with session_scope() as session:
-            workspace_ids = legacy_chunk_workspaces(session)
-    except SQLAlchemyError as exc:  # pragma: no cover - defensive
-        logger.warning("could not inspect chunk format: %s", exc)
-        return
-
-    if workspace_ids:
-        logger.warning(
-            "%d workspace(s) still hold flat, pre-hierarchy chunks and cite imprecisely. "
-            "Rebuild them with POST /api/workspaces/{id}/reindex. Affected: %s",
-            len(workspace_ids),
-            ", ".join(workspace_ids),
-        )
 
 
 app = create_app()

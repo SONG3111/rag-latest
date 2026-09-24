@@ -4,7 +4,6 @@ uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 
 # --- data ---
-sqlalchemy>=2.0
 pydantic>=2.7
 pydantic-settings>=2.3
 httpx>=0.27
@@ -16,13 +15,12 @@ langchain-openai>=0.3.0
 langchain-mcp-adapters>=0.1.0
 mcp[cli]>=1.10.1,<2  # code targets mcp 1.x API; 2.x renames fastmcp and breaks import
 
-# --- document tooling (shared with the MCP server) ---
+# --- document tooling (openpyxl/docx are re-exported by the MCP server
+#     subprocess; the mcp-office-server package itself is installed by the
+#     Dockerfile straight from ../mcp-office-server, so it is not pinned here) ---
 openpyxl>=3.1.5
 python-docx>=1.1.2
 python-dateutil>=2.9
-# Imported directly for proposal rebasing (formula reference shifting);
-# the MCP subprocess runs from this same package.
-mcp-office-server>=0.1.0
 
 # --- retrieval ---
 qdrant-client>=1.12

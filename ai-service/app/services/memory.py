@@ -21,13 +21,15 @@ budgets, not message counts —
   raw rows are never deleted or rewritten, compaction just moves the window
   start, which is what makes a re-run idempotent.
 
-Shared with the original migration: the summary runs on the cheap
+Since the Java-backend split this module is pure: rows arrive as duck-typed
+objects (the stateless chat request's message models qualify), and the caller
+decides where the returned ``(summary, covered_count)`` lands — in the split
+deployment that is the internal persist frame handed back to backend-java,
+which owns the ``conversation_summaries`` table. The summary runs on the cheap
 rewrite-model channel and every failure keeps the previous summary — an older
-summary beats a broken chat turn; the summary is injected as background
-context only. File-freshness facts are never its responsibility: staleness is
-decided deterministically by timestamp comparison in the routes layer, which
-is also why pi's cumulative <read-files>/<modified-files> ledger is
-deliberately not adopted here.
+summary beats a broken chat turn. File-freshness facts are never its
+responsibility: staleness is decided deterministically by timestamp comparison
+on the Java side.
 """
 
 from __future__ import annotations
@@ -35,12 +37,9 @@ from __future__ import annotations
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
 from ..llm.providers import build_chat_model
-from ..models import ConversationSummary, Message, MessageRole
 from .token_budget import estimate_messages, estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -59,8 +58,7 @@ _PER_MESSAGE_CHAR_LIMIT = 500
 # is folded into its place instead of copied verbatim (both upstream projects
 # merge, never append). Deliberately absent: pi's cumulative
 # <read-files>/<modified-files> ledger — file-freshness facts never enter the
-# summary here (see ConversationSummary); staleness is decided by timestamp
-# comparison in the routes layer.
+# summary here; staleness is decided by timestamp comparison on the Java side.
 COMPACT_SYSTEM_PROMPT = """## 角色
 对话记忆压缩助手。
 
@@ -83,32 +81,6 @@ COMPACT_SYSTEM_PROMPT = """## 角色
 - 只输出摘要本身，不超过 {max_chars} 字，不要额外说明。"""
 
 
-def load_summary(session: Session, workspace_id: str) -> str | None:
-    """The workspace's stored conversation summary, or None."""
-    row = session.get(ConversationSummary, workspace_id)
-    if row is None or not (row.summary or "").strip():
-        return None
-    return row.summary.strip()
-
-
-def uncovered_count(session: Session, workspace_id: str) -> int:
-    """How many stored messages the current summary does not cover.
-
-    ``covered_count`` counts from the oldest row, so the uncovered tail needs
-    the table total. A caller that fetched only the newest N rows uses this to
-    drop exactly the rows the summary already carries (pi slices by
-    ``firstKeptEntryId``; the bookmark arithmetic here is the same idea).
-    """
-    total = session.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(Message.workspace_id == workspace_id)
-    )
-    existing = session.get(ConversationSummary, workspace_id)
-    covered = existing.covered_count if existing else 0
-    return max(0, (total or 0) - covered)
-
-
 def shrink_history(messages: list, token_budget: int) -> list:
     """Head-reduce an in-memory LangChain history to the newest turns that fit.
 
@@ -117,7 +89,7 @@ def shrink_history(messages: list, token_budget: int) -> list:
     was too large, so this turn shrinks without waiting on another summarizer
     round-trip (dsh's "one maximal balanced head reduction"); the durable half
     — folding fat older turns into the summary so later turns start slim — is
-    the caller's ``compact_memory(..., force=True)``.
+    the caller's ``compute_compaction(..., force=True)``.
     """
     from .token_budget import estimate_message
 
@@ -142,16 +114,14 @@ def compute_compaction(
     summarizer=None,
     force: bool = False,
 ) -> tuple[str, int] | None:
-    """The pure half of ``compact_memory``: decide, fold, return the new bookmark.
+    """Decide whether to fold, run the summarizer, return the new bookmark.
 
-    ``rows`` are duck-typed (``.role``/``.content``/``.tool_calls`` — SQLAlchemy
-    Message rows and the stateless chat request's message models both qualify)
-    and are treated read-only: the caller decides where the returned
-    ``(summary, covered_count)`` lands. In the stateless chat deployment that
-    is the internal persist frame handed back to backend-java; in the legacy
-    process it is the ``conversation_summaries`` row, written by the
-    ``compact_memory`` wrapper below. Trigger semantics, gates, and failure
-    behavior are identical to the wrapper — see its docstring.
+    ``rows`` are duck-typed (``.role``/``.content``/``.tool_calls`` — the
+    stateless chat request's message models qualify) and are treated read-only:
+    the caller decides where the returned ``(summary, covered_count)`` lands.
+    Returns ``None`` when no fold happened (below both gates, nothing new
+    beyond the bookmark, or a failed summarization) — callers keep the
+    previous state in that case.
     """
     settings = settings or get_settings()
     if not rows:
@@ -165,8 +135,8 @@ def compute_compaction(
     to_compress = rows[:-keep]
 
     # Count gate: batch old thin turns so the summary call is amortized (the
-    # original watermark). Token gate: pressure is current, it cannot wait for a
-    # batch. Either alone triggers a fold.
+    # original watermark). Token gate: pressure is current, it cannot wait for
+    # a batch. Either alone triggers a fold.
     count_gate = len(rows) > max(recent, settings.memory_compact_trigger)
     pressure = _token_pressure(existing_summary, rows[covered:], recent, settings)
     if not (force or count_gate or pressure):
@@ -194,71 +164,11 @@ def compute_compaction(
     return summary, len(to_compress)
 
 
-def compact_memory(
-    session: Session,
-    workspace_id: str,
-    settings: Settings | None = None,
-    *,
-    summarizer=None,
-    force: bool = False,
-) -> bool:
-    """Fold all but the most recent turns into the rolling summary.
-
-    Returns True when a new summary was stored. Normally called after a turn
-    completes (background task), so the extra latency never blocks the user;
-    ``force=True`` is the synchronous emergency path (context overflow before a
-    retry): it skips the trigger check and halves the verbatim tail budget so
-    the retried request fits even if the estimate was optimistic. With no
-    summarizer the small rewrite model is used; a failed or empty
-    summarization keeps the previous state — the next turn simply falls back
-    to truncation.
-
-    Thin wrapper over :func:`compute_compaction` (the shared decision logic):
-    read the DB rows and stored bookmark, run the pure function, write the
-    result back.
-    """
-    settings = settings or get_settings()
-    rows = list(
-        session.scalars(
-            select(Message)
-            .where(Message.workspace_id == workspace_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
-        )
-    )
-    if not rows:
-        return False
-    existing = session.get(ConversationSummary, workspace_id)
-    result = compute_compaction(
-        rows,
-        existing.summary if existing else None,
-        existing.covered_count if existing else 0,
-        settings,
-        summarizer=summarizer,
-        force=force,
-    )
-    if result is None:
-        return False
-    summary, covered_count = result
-
-    if existing is None:
-        existing = ConversationSummary(workspace_id=workspace_id)
-        session.add(existing)
-    existing.summary = summary
-    existing.covered_count = covered_count
-    session.flush()
-    logger.info(
-        "compacted %d older messages into the conversation summary of %s",
-        covered_count,
-        workspace_id,
-    )
-    return True
-
-
-def _keep_boundary(rows: list[Message], token_budget: int, max_count: int) -> int:
+def _keep_boundary(rows: list, token_budget: int, max_count: int) -> int:
     """How many of the newest rows stay verbatim; the rest folds into the summary.
 
     Backward walk over token estimates (pi's cut-point walk). The count cap is
-    ``memory_recent_messages`` — the routes layer replays at most that many
+    ``memory_recent_messages`` — the history assembly replays at most that many
     rows, so folding less would waste summary coverage on rows the model never
     sees. At least one row is always kept: a window that cannot hold the
     newest message is not something a summary can fix.
@@ -277,7 +187,7 @@ def _keep_boundary(rows: list[Message], token_budget: int, max_count: int) -> in
 
 
 def _token_pressure(
-    previous: str | None, uncovered: list[Message], recent: int, settings: Settings
+    previous: str | None, uncovered: list, recent: int, settings: Settings
 ) -> bool:
     """Estimated summary + recent window vs. the model-visible token budget."""
     window = uncovered[-recent:]
@@ -285,12 +195,10 @@ def _token_pressure(
     return used > settings.memory_context_token_budget
 
 
-def _build_prompt(previous: str | None, rows: list[Message]) -> str:
+def _build_prompt(previous: str | None, rows: list) -> str:
     lines: list[str] = []
     for row in rows:
-        # == rather than `is`: MessageRole is a str-enum, and compute_compaction
-        # also feeds plain "user"/"assistant"-string request models through here.
-        role = "用户" if row.role == MessageRole.user else "助手"
+        role = "用户" if row.role == "user" else "助手"
         content = (row.content or "").strip().replace("\n", " ")
         if not content:
             continue

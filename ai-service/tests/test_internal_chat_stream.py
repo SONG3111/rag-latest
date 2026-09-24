@@ -18,9 +18,9 @@ from httpx import ASGITransport, AsyncClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 from openpyxl import Workbook
 
-pytestmark = pytest.mark.anyio
+from conftest import seed_workspace_file
 
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+pytestmark = pytest.mark.anyio
 
 
 class ScriptedLLM:
@@ -80,13 +80,9 @@ def workbook_bytes() -> bytes:
 
 
 async def _upload_workbook(client: AsyncClient) -> str:
-    created = await client.post("/api/workspaces", json={"name": "无状态对话"})
-    workspace_id = created.json()["id"]
-    uploaded = await client.post(
-        f"/api/workspaces/{workspace_id}/files",
-        files=[("files", ("销售表.xlsx", workbook_bytes(), XLSX_MIME))],
-    )
-    assert uploaded.status_code == 201
+    """Stage the workbook the way Java's upload would (stateless service)."""
+    workspace_id = "ws-chat-stream"
+    seed_workspace_file(workspace_id, "销售表.xlsx", workbook_bytes())
     return workspace_id
 
 
@@ -219,10 +215,11 @@ async def test_write_turn_proposal_carries_arguments_and_null_operation_id(
     # The placeholder answer announces the pending proposal (compose_answer).
     assert "1 条待确认的修改提案" in persist["content"]
 
-    # 无状态端点不落库：消息表不因这轮对话多出任何行。
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        messages = (await client.get(f"/api/workspaces/{workspace_id}/messages")).json()
-    assert messages == []
+    # 无状态端点不落库：ai-service 在自己的存储树里没有任何关系状态
+    # （app.db 归 backend-java 进程所有，且路径根本不在本服务的职责内）。
+    from app.config import get_settings
+
+    assert not (get_settings().data_dir / "app.db").exists()
 
 
 async def test_provider_failure_yields_error_event_then_placeholder_persist(

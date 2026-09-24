@@ -3,9 +3,11 @@
 For each spreadsheet tool this script drives the full agent stack — the real LLM
 selected by ``build_chat_model`` (see .env), the real MCP server subprocess over
 stdio, the proposal/approval loop — and then verifies the resulting file bytes
-with openpyxl. What is *not* real: the knowledge-base search is stubbed to return
-empty results (the files in this throwaway workspace are never embedded), and
-approval is automatic instead of human.
+with openpyxl. What is *not* real: the knowledge-base search returns empty
+results (the files in this throwaway workspace are never embedded; the corpus
+loader hands the retriever an empty corpus), and approval is automatic instead
+of human (each proposal is applied by invoking its tool directly, the same call
+backend-java makes through /v1/tools/call after approving).
 
     python scripts/test_excel_mcp_live.py [--out docs/test-report/9-12/excel-mcp-live-results.json]
 
@@ -24,11 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 
 PRODUCTS: list[tuple[str, str, int, float]] = [
     ("无线耳机", "数码", 12, 299.0),
@@ -390,13 +390,10 @@ async def run_direct_error_checks(client, workspace_id: str) -> list[dict[str, A
 async def main_async(out_path: Path) -> int:
     import tempfile
 
-    from app import models
-    from app.agent.graph import WorkspaceAgent
+    from app.agent.graph import AgentRuntime, WorkspaceAgent
     from app.config import get_settings
-    from app.db import Base
     from app.llm.providers import build_chat_model
-    from app.mcp_client import McpOfficeClient
-    from app.services.operations import apply_operation
+    from app.mcp_client import McpOfficeClient, parse_tool_result
 
     settings = get_settings()
     if not settings.dashscope_api_key:
@@ -408,49 +405,12 @@ async def main_async(out_path: Path) -> int:
         settings.data_dir = tmp_path / "data"
         settings.ensure_directories()
 
-        engine = create_engine(
-            f"sqlite:///{(tmp_path / 'live.db').as_posix()}",
-            connect_args={"check_same_thread": False},
-            future=True,
-        )
-        Base.metadata.create_all(engine)
-        factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-        session = factory()
-
-        workspace = models.Workspace(name="表格工具实测")
-        session.add(workspace)
-        session.flush()
-        ws_dir = settings.workspace_dir(workspace.id)
+        # 无状态模式：工作区只是一个目录名，没有数据库行；agent 拿到的
+        # runtime 就是 /v1/chat/stream 会为 Java 构造的那份（空语料 + 在册文件）。
+        workspace_id = "ws-excel-live"
+        ws_dir = settings.workspace_dir(workspace_id)
         ws_dir.mkdir(parents=True, exist_ok=True)
         build_workbook(ws_dir / "订单表.xlsx")
-        session.add(
-            models.DocumentFile(
-                workspace_id=workspace.id,
-                rel_path="订单表.xlsx",
-                kind="excel",
-                status=models.IndexStatus.pending,
-            )
-        )
-        session.commit()
-
-        # The KB search is stubbed: these files are never embedded in this throwaway
-        # workspace, and loading the local bge-m3 per call would dominate the runtime.
-        from app.retrieval.pipeline import RetrievalRun
-
-        class EmptyRetriever:
-            def __init__(self, *args, **kwargs) -> None:
-                self.last_run = RetrievalRun(
-                    original_query="",
-                    effective_query="",
-                    rewritten=False,
-                )
-
-            def search(self, query: str, top_k: int = 5, **kwargs):
-                return []
-
-        import app.agent.graph as graph_module
-
-        graph_module.Retriever = EmptyRetriever
 
         results: list[dict[str, Any]] = []
         client = McpOfficeClient(workspace_root=settings.workspaces_dir)
@@ -459,14 +419,19 @@ async def main_async(out_path: Path) -> int:
             print(f"model={settings.llm_model}  tools={len(client.tools())}")
             llm = build_chat_model(settings)
 
-            direct = await run_direct_error_checks(client, workspace.id)
+            direct = await run_direct_error_checks(client, workspace_id)
             for item in direct:
                 print(f"  [{'OK ' if item['ok'] else 'FAIL'}] {item['check']}: {item['detail']}")
             results.append({"id": "S00", "tool": "(direct error paths)", "checks": direct})
 
             for scenario in scenarios("订单表.xlsx"):
                 print(f"\n== {scenario['id']} [{scenario['tool']}] {scenario['question']}")
-                agent = WorkspaceAgent(session, workspace, client, settings=settings, llm=llm)
+                runtime = AgentRuntime(
+                    workspace_id=workspace_id,
+                    tracked_files={"订单表.xlsx"},
+                    corpus_loader=lambda: ({}, []),
+                )
+                agent = WorkspaceAgent(client, settings, llm=llm, runtime=runtime)
                 trace = await drive_agent(agent, scenario["question"])
                 record: dict[str, Any] = {
                     "id": scenario["id"],
@@ -491,25 +456,27 @@ async def main_async(out_path: Path) -> int:
 
                 # Writes: apply every pending proposal this turn produced, then judge
                 # the file itself. The proposal must exist before the file changes.
+                # (Auto-approval = invoking the proposed tool call directly, exactly
+                # what backend-java does through /v1/tools/call after approving.)
                 applied: list[dict[str, Any]] = []
                 proposals = trace["proposals"]
                 for proposal in proposals:
-                    operation = session.get(models.Operation, proposal["operation_id"])
                     target = ws_dir / "订单表.xlsx"
                     before = target.read_bytes()
                     try:
-                        result_payload = await apply_operation(session, operation, client)
-                        session.commit()
+                        tool = client.tool(proposal["tool"])
+                        result_payload = parse_tool_result(
+                            await tool.ainvoke(proposal["arguments"])
+                        )
                         applied.append(
                             {
-                                "tool": operation.tool_name,
-                                "summary": operation.summary,
+                                "tool": proposal["tool"],
+                                "summary": proposal["summary"],
                                 "result": result_payload,
                                 "file_changed": target.read_bytes() != before,
                             }
                         )
                     except Exception as exc:  # noqa: BLE001
-                        session.rollback()
                         failures.append(f"apply 失败: {exc}")
                 record["proposals"] = [
                     {"tool": p["tool"], "summary": p["summary"], "diff": p.get("diff")}
@@ -535,8 +502,6 @@ async def main_async(out_path: Path) -> int:
                 )
         finally:
             await client.stop()
-            session.close()
-            engine.dispose()
 
     passed = sum(1 for r in results if r.get("verdict") == "PASS")
     failed = sum(1 for r in results if r.get("verdict") == "FAIL")

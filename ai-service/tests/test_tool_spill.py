@@ -18,9 +18,13 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
-from app.agent.graph import KNOWLEDGE_TOOL_NAME, AgentEvent, WorkspaceAgent
+from app.agent.graph import (
+    KNOWLEDGE_TOOL_NAME,
+    AgentEvent,
+    AgentRuntime,
+    WorkspaceAgent,
+)
 from app.mcp_client import McpOfficeClient
-from app.models import Workspace
 from app.services.spill import spill_tool_result
 
 FAT_TEXT = "长" * 5000
@@ -109,7 +113,8 @@ class FakeRetriever:
         threshold_applied=0.0,
     )
 
-    def __init__(self, session: Any, workspace_id: str, settings: Any) -> None:
+    def __init__(self, *args, **kwargs) -> None:
+        # The graph constructs Retriever(workspace_id, settings, corpus_loader=...).
         pass
 
     def search(self, query: str, top_k: int = 5, history=None, trace=None):
@@ -121,25 +126,23 @@ def _call(name: str, args: dict, call_id: str = "call-1") -> AIMessage:
 
 
 @pytest.fixture()
-def spill_agent_env(temp_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Same shape as test_agent's agent_env: real workspace row + storage root."""
+def spill_agent_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Same shape as test_agent's agent_env: a workspace id + storage root."""
     from app.config import get_settings
 
     settings = get_settings()
     monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
     settings.ensure_directories()
 
-    workspace = Workspace(name="Spill 测试")
-    temp_session.add(workspace)
-    temp_session.flush()
-    settings.workspace_dir(workspace.id).mkdir(parents=True, exist_ok=True)
-    return workspace
+    workspace_id = "ws-spill"
+    settings.workspace_dir(workspace_id).mkdir(parents=True, exist_ok=True)
+    return workspace_id
 
 
 def test_knowledge_result_spills_but_citations_stay_complete(
-    spill_agent_env, temp_session, monkeypatch
+    spill_agent_env, monkeypatch
 ):
-    workspace = spill_agent_env
+    workspace_id = spill_agent_env
     monkeypatch.setattr("app.agent.graph.Retriever", FakeRetriever)
     scripted = ScriptedLLM(
         [
@@ -154,7 +157,11 @@ def test_knowledge_result_spills_but_citations_stay_complete(
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            runtime = AgentRuntime(
+                workspace_id=workspace_id,
+                corpus_loader=lambda: ({}, []),
+            )
+            agent = WorkspaceAgent(client, llm=scripted, runtime=runtime)
             events: list[AgentEvent] = []
             async for event in agent.astream("测试"):
                 events.append(event)
@@ -186,7 +193,7 @@ def test_knowledge_result_spills_but_citations_stay_complete(
     # The full payload landed in the session-scoped spill store.
     from app.config import get_settings
 
-    spill_dir = get_settings().data_dir / "spill" / workspace.id
+    spill_dir = get_settings().data_dir / "spill" / workspace_id
     files = list(spill_dir.iterdir())
     assert len(files) == 1
     assert FAT_TEXT in files[0].read_text(encoding="utf-8")

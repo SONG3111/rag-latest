@@ -1,9 +1,11 @@
 """Regression tests for citation click-through preview (docs/05 §4.2).
 
 The preview endpoint re-reads the original file through the real MCP subprocess
-(read_range / read_paragraphs / read_table) — the same read path the agent uses —
-so a workbook/docx is uploaded over the API and the returned window is asserted
-verbatim. No model is involved anywhere (AGENTS.md: mock-only tests).
+(read_range / read_paragraphs / read_table) — the same read path the agent uses.
+Files are staged straight onto the temp storage tree (Java owns the upload rows
+now); the preview contract is served by the internal ``/v1`` endpoint that
+backend-java relays to the frontend. No model is involved anywhere
+(AGENTS.md: mock-only tests).
 """
 
 from __future__ import annotations
@@ -15,10 +17,9 @@ from docx import Document
 from httpx import ASGITransport, AsyncClient
 from openpyxl import Workbook
 
-pytestmark = pytest.mark.anyio
+from conftest import seed_workspace_file
 
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+pytestmark = pytest.mark.anyio
 
 
 def workbook_bytes() -> bytes:
@@ -59,19 +60,14 @@ def table_document_bytes() -> bytes:
 
 
 async def _workspace_with_files(app) -> str:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        workspace_id = (await client.post("/api/workspaces", json={"name": "引用预览"})).json()["id"]
-        uploaded = await client.post(
-            f"/api/workspaces/{workspace_id}/files",
-            files=[
-                ("files", ("销售表.xlsx", workbook_bytes(), XLSX_MIME)),
-                ("files", ("制度.docx", document_bytes(), DOCX_MIME)),
-                ("files", ("附表.docx", table_document_bytes(), DOCX_MIME)),
-            ],
-        )
-        assert uploaded.status_code == 201
-        return workspace_id
+    workspace_id = "ws-preview"
+    for rel_path, content in (
+        ("销售表.xlsx", workbook_bytes()),
+        ("制度.docx", document_bytes()),
+        ("附表.docx", table_document_bytes()),
+    ):
+        seed_workspace_file(workspace_id, rel_path, content)
+    return workspace_id
 
 
 async def test_excel_row_location_previews_a_window(app_with_temp_storage) -> None:
@@ -81,7 +77,7 @@ async def test_excel_row_location_previews_a_window(app_with_temp_storage) -> No
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                f"/api/workspaces/{workspace_id}/preview",
+                f"/v1/workspaces/{workspace_id}/preview",
                 params={"file": "销售表.xlsx", "location": "销售!第3行"},
             )
             assert response.status_code == 200
@@ -102,7 +98,7 @@ async def test_word_paragraph_location_previews_surroundings(app_with_temp_stora
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                f"/api/workspaces/{workspace_id}/preview",
+                f"/v1/workspaces/{workspace_id}/preview",
                 params={"file": "制度.docx", "location": "段落 1"},
             )
             assert response.status_code == 200
@@ -120,7 +116,7 @@ async def test_word_table_location_previews_the_table(app_with_temp_storage) -> 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                f"/api/workspaces/{workspace_id}/preview",
+                f"/v1/workspaces/{workspace_id}/preview",
                 params={"file": "附表.docx", "location": "表格 0 第 2 行"},
             )
             assert response.status_code == 200
@@ -137,7 +133,7 @@ async def test_unknown_location_format_is_rejected(app_with_temp_storage) -> Non
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                f"/api/workspaces/{workspace_id}/preview",
+                f"/v1/workspaces/{workspace_id}/preview",
                 params={"file": "销售表.xlsx", "location": "不知道在哪里"},
             )
             assert response.status_code == 400

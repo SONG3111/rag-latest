@@ -34,11 +34,11 @@ from ..agent.intent import classify_intent
 from ..config import Settings, get_settings
 from ..llm.resilience import translate_provider_error
 from ..retrieval.pipeline import ChunkRecord
+from ..services.answers import compose_answer
 from ..services.followups import generate_followups
 from ..services.memory import compute_compaction
 from ..services.token_budget import estimate_tokens
 from ..services.tracing import TraceCollector
-from .routes import compose_answer
 
 logger = logging.getLogger(__name__)
 
@@ -251,11 +251,18 @@ async def chat_stream(payload: InternalChatRequest, request: Request) -> EventSo
                             ensure_ascii=False,
                         ),
                     }
-        except (asyncio.CancelledError, NodeCancelledError):
+        except asyncio.CancelledError:
             # Java 侧（唯一客户端）断开：帧发不出去，直接停。部分答案的持久化
             # 由 Java 用它已转发的 token 快照完成（见 ChatController）。
             logger.info("internal chat stream cancelled by caller")
             raise
+        except NodeCancelledError:
+            # 同源事件的另一种形态：模型流中途抛 CancelledError 被 LangGraph 包装
+            # 成节点失败。这里不能上抛——那会把 SSE 响应炸成 5xx，而已经流出的
+            # token 帧必须保持有效。直接结束流（无 persist 帧），部分答案同样
+            # 由 Java 从它已转发的 token 快照组装。
+            logger.info("internal chat stream cancelled mid-turn")
+            return
         except TimeoutError:
             status = "timeout"
             answer = partial_answer() + "\n\n（本轮生成超时已中断，以上为已生成的部分。）"

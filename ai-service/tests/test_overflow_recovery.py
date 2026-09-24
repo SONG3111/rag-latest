@@ -6,19 +6,21 @@ pinned: the retry fires exactly once, only for overflow-shaped errors, and only
 before the first packet; the user sees a notice first; a persistent overflow
 surfaces the error frame after that one retry; a mid-stream overflow never
 retries (the streamed half-answer must not be torn).
+
+The turn is driven through the stateless ``/v1/chat/stream`` endpoint (history
+arrives in the request; the durable half of the fold rides the persist frame's
+``summary`` for backend-java to store).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessageChunk
 
 from app.llm.providers import ProviderError
-from app.models import ConversationSummary, Message, MessageRole
 
 pytestmark = pytest.mark.anyio
 
@@ -71,18 +73,11 @@ class TextThenOverflowLLM(OverflowOnceLLM):
         raise ProviderError(OVERFLOW_TEXT)
 
 
-def _seed_turns(session, workspace_id: str, turns: int) -> None:
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    for index in range(turns):
-        session.add(
-            Message(
-                workspace_id=workspace_id,
-                role=MessageRole.user if index % 2 == 0 else MessageRole.assistant,
-                content=f"第{index}轮消息",
-                created_at=base + timedelta(minutes=index),
-            )
-        )
-    session.flush()
+def _history(turns: int) -> list[dict]:
+    return [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"第{index}轮消息"}
+        for index in range(turns)
+    ]
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, model) -> None:
@@ -95,12 +90,19 @@ def _install(monkeypatch: pytest.MonkeyPatch, model) -> None:
     )
 
 
-async def _stream_turn(app, workspace_id: str, message: str):
+async def _stream_turn(
+    app, workspace_id: str, message: str, messages: list[dict] | None = None
+):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            f"/api/workspaces/{workspace_id}/chat/stream",
-            json={"message": message},
+            "/v1/chat/stream",
+            json={
+                "workspace_id": workspace_id,
+                "run_id": "run-overflow",
+                "message": message,
+                "messages": messages or [],
+            },
         )
     return response.text
 
@@ -143,34 +145,26 @@ async def test_overflow_triggers_one_forced_compaction_and_retry(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "溢出重试"})
-            ).json()["id"]
-            session = app.state.test_session_factory()
-            _seed_turns(session, workspace_id, turns=25)
-            session.commit()
-
-            body = await _stream_turn(app, workspace_id, "继续刚才的话题")
-            frames = _frames(body)
+        body = await _stream_turn(
+            app, "ws-overflow", "继续刚才的话题", messages=_history(25)
+        )
+        frames = _frames(body)
 
     # The user is told about the recovery, then gets a real answer.
     notices = [payload for name, payload in frames if name == "notice"]
     assert any("压缩" in payload.get("message", "") for payload in notices)
-    done = next(payload for name, payload in frames if name == "done")
-    assert done["content"] == "压缩后回答成功"
+    persist = next(payload for name, payload in frames if name == "persist")
+    assert persist["status"] == "ok"
+    assert persist["content"] == "压缩后回答成功"
 
     # Exactly one retry — not a loop.
     assert model.calls == 2
 
     # The durable half: the forced fold moved the bookmark so the next turn
-    # starts from a slimmer history.
-    session = app.state.test_session_factory()
-    summary = session.get(ConversationSummary, workspace_id)
-    assert summary is not None and summary.summary == "应急摘要"
-    # 26 stored rows (25 seeded + the new user message), 20 kept verbatim.
-    assert summary.covered_count == 6
+    # starts from a slimmer history. The bookmark rides the persist frame for
+    # backend-java to store (26 rows = 25 request messages + this user turn,
+    # 20 kept verbatim).
+    assert persist["summary"] == {"text": "应急摘要", "covered_count": 6}
 
 
 async def test_persistent_overflow_surfaces_the_error_after_one_retry(
@@ -181,13 +175,7 @@ async def test_persistent_overflow_surfaces_the_error_after_one_retry(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "持续溢出"})
-            ).json()["id"]
-
-            body = await _stream_turn(app, workspace_id, "再来一次")
+        body = await _stream_turn(app, "ws-overflow", "再来一次")
 
     notices = [payload for name, payload in _frames(body) if name == "notice"]
     errors = [payload for name, payload in _frames(body) if name == "error"]
@@ -218,13 +206,7 @@ async def test_overflow_with_no_user_visible_tokens_still_retries(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "流中溢出"})
-            ).json()["id"]
-
-            body = await _stream_turn(app, workspace_id, "再说一次")
+        body = await _stream_turn(app, "ws-overflow", "再说一次")
 
     frames = _frames(body)
     assert model.calls == 2
@@ -234,8 +216,8 @@ async def test_overflow_with_no_user_visible_tokens_still_retries(
     assert tokens == ["压缩后回答成功"]
     names = [name for name, _ in frames]
     assert names.index("notice") < names.index("token")
-    done = next(payload for name, payload in frames if name == "done")
-    assert done["content"] == "压缩后回答成功"
+    persist = next(payload for name, payload in frames if name == "persist")
+    assert persist["content"] == "压缩后回答成功"
 
 
 async def test_overflow_after_streamed_text_is_not_retried(
@@ -248,13 +230,7 @@ async def test_overflow_after_streamed_text_is_not_retried(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "已流出再溢出"})
-            ).json()["id"]
-
-            body = await _stream_turn(app, workspace_id, "再说一次")
+        body = await _stream_turn(app, "ws-overflow", "再说一次")
 
     frames = _frames(body)
     # Two loop iterations happened; the guard refused a third (retry) attempt.

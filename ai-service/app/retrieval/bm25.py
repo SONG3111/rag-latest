@@ -13,11 +13,12 @@ import hashlib
 import math
 import re
 from collections import Counter, defaultdict
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import jieba
 
-from ..models import Chunk
+if TYPE_CHECKING:
+    from .pipeline import ChunkRecord
 
 K1 = 1.5
 B = 0.75
@@ -57,7 +58,7 @@ def token_counts(text: str) -> dict[str, int]:
 class BM25Index:
     """Snapshot of a workspace's chunks, scored in memory."""
 
-    def __init__(self, chunks: Iterable[Chunk]) -> None:
+    def __init__(self, chunks: Iterable[ChunkRecord]) -> None:
         self.chunk_ids: list[str] = []
         self.token_counts: list[dict[str, int]] = []
         self.lengths: list[int] = []

@@ -263,17 +263,17 @@ def parse_sse_frames(body: str) -> list[tuple[str, dict]]:
 
 async def _stream_turn(app, workspace_id: str, message: str, client: AsyncClient):
     response = await client.post(
-        f"/api/workspaces/{workspace_id}/chat/stream",
-        json={"message": message},
+        "/v1/chat/stream",
+        json={
+            "workspace_id": workspace_id,
+            "run_id": "run-resilience",
+            "message": message,
+        },
     )
     return parse_sse_frames(response.text)
 
 
-async def _make_workspace(app) -> str:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post("/api/workspaces", json={"name": "弹性测试"})
-        return created.json()["id"]
+WORKSPACE_ID = "ws-resilience"
 
 
 def _client_for(app) -> AsyncClient:
@@ -308,11 +308,10 @@ async def test_fallback_chain_surfaces_a_notice_and_the_backup_answer(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _make_workspace(app)
         async with _client_for(app) as client:
             # Not a rules-classified chitchat message: this test needs the agent
             # loop so the resilient model is actually bound and can switch.
-            frames = await _stream_turn(app, workspace_id, "工作区里有什么文件", client)
+            frames = await _stream_turn(app, WORKSPACE_ID, "工作区里有什么文件", client)
 
             events = [name for name, _ in frames]
             assert "error" not in events
@@ -321,13 +320,8 @@ async def test_fallback_chain_surfaces_a_notice_and_the_backup_answer(
             assert "fake-live-model" in notices[0]["message"]
 
             streamed = "".join(payload["text"] for n, payload in frames if n == "token")
-            done = next(payload for n, payload in frames if n == "done")
-            assert streamed == done["content"] == "备用模型的回答。"
-
-            messages = (
-                await client.get(f"/api/workspaces/{workspace_id}/messages")
-            ).json()
-            assert messages[-1]["content"] == "备用模型的回答。"
+            persist = next(payload for n, payload in frames if n == "persist")
+            assert streamed == persist["content"] == "备用模型的回答。"
 
 
 async def test_thinking_fragments_stream_as_thinking_events_and_are_not_persisted(
@@ -346,9 +340,8 @@ async def test_thinking_fragments_stream_as_thinking_events_and_are_not_persiste
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _make_workspace(app)
         async with _client_for(app) as client:
-            frames = await _stream_turn(app, workspace_id, "答案是多少", client)
+            frames = await _stream_turn(app, WORKSPACE_ID, "答案是多少", client)
 
             thinking = "".join(
                 payload["text"] for n, payload in frames if n == "thinking"
@@ -357,11 +350,9 @@ async def test_thinking_fragments_stream_as_thinking_events_and_are_not_persiste
             streamed = "".join(payload["text"] for n, payload in frames if n == "token")
             assert streamed == "答案是 42。", "thinking text must never leak into tokens"
 
-            messages = (
-                await client.get(f"/api/workspaces/{workspace_id}/messages")
-            ).json()
-            assert messages[-1]["content"] == "答案是 42。"
-            assert "思考" not in messages[-1]["content"], "thinking is never persisted"
+            persist = next(payload for n, payload in frames if n == "persist")
+            assert persist["content"] == "答案是 42。"
+            assert "思考" not in persist["content"], "thinking is never persisted"
 
 
 async def test_turn_timeout_persists_the_partial_answer(
@@ -396,21 +387,16 @@ async def test_turn_timeout_persists_the_partial_answer(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _make_workspace(app)
         async with _client_for(app) as client:
-            frames = await _stream_turn(app, workspace_id, "慢慢答", client)
+            frames = await _stream_turn(app, WORKSPACE_ID, "慢慢答", client)
 
             events = [name for name, _ in frames]
             assert "error" not in events
             notices = [payload for n, payload in frames if n == "notice"]
             assert notices and "超时" in notices[0]["message"]
-            done = next(payload for n, payload in frames if n == "done")
-            assert "开头" in done["content"] and "超时" in done["content"]
-
-            messages = (
-                await client.get(f"/api/workspaces/{workspace_id}/messages")
-            ).json()
-            assert "开头" in messages[-1]["content"]
+            persist = next(payload for n, payload in frames if n == "persist")
+            assert persist["status"] == "timeout"
+            assert "开头" in persist["content"] and "超时" in persist["content"]
 
 
 async def test_client_disconnect_persists_the_partial_answer(
@@ -445,16 +431,14 @@ async def test_client_disconnect_persists_the_partial_answer(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _make_workspace(app)
         async with _client_for(app) as client:
-            frames = await _stream_turn(app, workspace_id, "长篇大论", client)
+            frames = await _stream_turn(app, WORKSPACE_ID, "长篇大论", client)
 
             events = [name for name, _ in frames]
             assert "error" not in events
-            assert "done" not in events, "a stopped turn never reaches a normal done"
-
-            messages = (
-                await client.get(f"/api/workspaces/{workspace_id}/messages")
-            ).json()
-            assert "已经生成的部分" in messages[-1]["content"]
-            assert "停止" in messages[-1]["content"]
+            # A cancelled turn never reaches a persist frame: backend-java
+            # assembles the partial answer from the token frames it already
+            # forwarded (see ChatController).
+            assert "persist" not in events
+            streamed = "".join(payload["text"] for n, payload in frames if n == "token")
+            assert "已经生成的部分" in streamed

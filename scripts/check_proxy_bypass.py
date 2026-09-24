@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 
 # Port 9 (discard) is almost never listening, so a client that honours these will
 # fail fast instead of silently succeeding.

@@ -22,7 +22,7 @@ COPY ai-service ./ai-service
 
 # The MCP server is spawned as a subprocess, so the sandbox root has to exist
 # inside the image.
-RUN mkdir -p /app/data/workspaces /app/data/backups /app/data/qdrant
+RUN mkdir -p /app/data/workspaces /app/data/qdrant
 
 ENV PYTHONPATH=/app/ai-service \
     DATA_DIR=/app/data

@@ -12,9 +12,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from openpyxl import Workbook
 
-pytestmark = pytest.mark.anyio
+from conftest import seed_workspace_file
 
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+pytestmark = pytest.mark.anyio
 
 
 def workbook_bytes() -> bytes:
@@ -30,19 +30,13 @@ def workbook_bytes() -> bytes:
 
 @pytest.fixture()
 async def seeded(app_with_temp_storage):
-    """A workspace holding one uploaded xlsx, plus a live HTTP client."""
+    """A workspace holding one staged xlsx, plus a live HTTP client."""
     app = app_with_temp_storage
+    workspace_id = "ws-internal"
+    seed_workspace_file(workspace_id, "销售表.xlsx", workbook_bytes())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            workspace_id = (
-                await client.post("/api/workspaces", json={"name": "内部契约"})
-            ).json()["id"]
-            upload = await client.post(
-                f"/api/workspaces/{workspace_id}/files",
-                files=[("files", ("销售表.xlsx", workbook_bytes(), XLSX_MIME))],
-            )
-            assert upload.status_code == 201
             yield client, workspace_id, "销售表.xlsx"
 
 

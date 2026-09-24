@@ -23,7 +23,7 @@ from docx import Document
 from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 
 LONG_PARAGRAPH = (
     "报销人应当在费用发生后的三十个工作日内提交报销申请，逾期未提交的，财务部门有权拒绝受理。"

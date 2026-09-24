@@ -137,16 +137,17 @@ async def _run_turn(app, workspace_id: str, message: str) -> list[tuple[str, dic
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            f"/api/workspaces/{workspace_id}/chat/stream",
-            json={"message": message},
+            "/v1/chat/stream",
+            json={
+                "workspace_id": workspace_id,
+                "run_id": "run-intent",
+                "message": message,
+            },
         )
         return parse_sse_frames(response.text)
 
 
-async def _workspace(app) -> str:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return (await client.post("/api/workspaces", json={"name": "意图门控"})).json()["id"]
+WORKSPACE_ID = "ws-intent"
 
 
 async def test_chitchat_is_answered_without_entering_the_tool_loop(
@@ -161,13 +162,12 @@ async def test_chitchat_is_answered_without_entering_the_tool_loop(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _workspace(app)
-        frames = await _run_turn(app, workspace_id, "你好")
+        frames = await _run_turn(app, WORKSPACE_ID, "你好")
 
         events = [name for name, _ in frames]
         assert "tool_call" not in events and "tool_result" not in events
-        done = next(payload for name, payload in frames if name == "done")
-        assert done["content"] == "你好！想查数据还是改文档？"
+        persist = next(payload for name, payload in frames if name == "persist")
+        assert persist["content"] == "你好！想查数据还是改文档？"
         # The direct path never binds tools at all — that is the whole point.
         assert scripted.bound_tools is None
 
@@ -190,8 +190,7 @@ async def test_lookup_intent_masks_write_tools(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _workspace(app)
-        frames = await _run_turn(app, workspace_id, "表格里 A型 的销售额是多少？")
+        frames = await _run_turn(app, WORKSPACE_ID, "表格里 A型 的销售额是多少？")
 
         events = [name for name, _ in frames]
         assert "error" not in events
@@ -199,8 +198,8 @@ async def test_lookup_intent_masks_write_tools(
         assert "update_cells" not in scripted.bound_tools, "write tools must be masked"
         assert "search_knowledge_base" in scripted.bound_tools, "retrieval stays available"
 
-        done = next(payload for name, payload in frames if name == "done")
-        assert "1000" in done["content"]
+        persist = next(payload for name, payload in frames if name == "persist")
+        assert "1000" in persist["content"]
 
 
 async def test_write_intent_keeps_the_full_tool_set(
@@ -226,8 +225,7 @@ async def test_write_intent_keeps_the_full_tool_set(
 
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        workspace_id = await _workspace(app)
-        frames = await _run_turn(app, workspace_id, "把 B2 改成 1500")
+        frames = await _run_turn(app, WORKSPACE_ID, "把 B2 改成 1500")
 
         assert scripted.bound_tools is not None
         assert "update_cells" in scripted.bound_tools, "write intent keeps write tools"

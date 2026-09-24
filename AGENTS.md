@@ -37,11 +37,11 @@
   embeddings / seed 提案 + 真实 MCP 子进程，全程不调用模型；
 - backend-java 测试套件（`backend-java/src/test/`，JUnit5 + WireMock 桩掉
   ai-service）：业务端点、SSE 中继与落库，全程不调用模型也不依赖 Python 进程；
-- mcp-office-server 测试套件（`mcp-office-server/tests/`，74 个用例）：直接调用
+- mcp-office-server 测试套件（`mcp-office-server/tests/`，170 个用例）：直接调用
   工具函数与 MCP tool 层；
 - 需要多提案审批顺序等 API 级场景时，用 seed 数据直接驱动 REST 接口
-  （参考 `ai-service/tests/test_proposal_rebase.py`、`test_api_operations.py`
-  与 `backend-java` 中对应的种子提案测试写法）。
+  （参考 `backend-java/src/test/.../OperationsApiTests.java` 的种子提案写法；
+  Python 侧的同类行为已随旧 REST 层退役，现由 Java 套件覆盖）。
 
 服务结构（feat/java-backend 分支起生效）：`backend-java/`（Spring Boot，Java 21，
 对外 8000，独占 SQLite）+ `ai-service/`（FastAPI，内网 8001，负责 agent/检索/嵌入/

@@ -3,6 +3,11 @@
 Real tool-selection quality depends on the LLM, but the *control flow* around it —
 which calls execute, which are gated, how many loops run — is deterministic and is
 what these tests pin down. A scripted fake model makes that testable without a key.
+
+The agent is stateless now (persistence lives in backend-java): every test builds
+an :class:`AgentRuntime` carrying the per-turn facts — the tracked file list, an
+empty corpus loader, and the in-memory proposal collector — the way the internal
+chat endpoint does.
 """
 
 from __future__ import annotations
@@ -16,9 +21,8 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from openpyxl import Workbook
 
-from app.agent.graph import AgentEvent, WorkspaceAgent
+from app.agent.graph import AgentEvent, AgentRuntime, WorkspaceAgent
 from app.mcp_client import McpOfficeClient, parse_tool_result
-from app.models import Workspace
 
 
 class ScriptedLLM:
@@ -53,18 +57,15 @@ class ScriptedLLM:
 
 
 @pytest.fixture()
-def agent_env(temp_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def agent_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from app.config import get_settings
 
     settings = get_settings()
     monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
     settings.ensure_directories()
 
-    workspace = Workspace(name="Agent 测试")
-    temp_session.add(workspace)
-    temp_session.flush()
-
-    directory = settings.workspace_dir(workspace.id)
+    workspace_id = "ws-agent"
+    directory = settings.workspace_dir(workspace_id)
     directory.mkdir(parents=True, exist_ok=True)
     book = Workbook()
     sheet = book.active
@@ -73,7 +74,16 @@ def agent_env(temp_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sheet.append(["A型", 1000])
     book.save(directory / "销售表.xlsx")
 
-    return workspace, directory
+    return workspace_id, directory
+
+
+def _runtime(workspace_id: str, tracked: set[str] | None = None) -> AgentRuntime:
+    """The per-turn runtime the stateless chat endpoint would hand the agent."""
+    return AgentRuntime(
+        workspace_id=workspace_id,
+        tracked_files=tracked if tracked is not None else {"销售表.xlsx"},
+        corpus_loader=lambda: ({}, []),
+    )
 
 
 def _call(name: str, args: dict, call_id: str = "call-1") -> AIMessage:
@@ -91,8 +101,8 @@ async def _run(
     return events
 
 
-def test_read_only_tool_executes_without_approval(agent_env, temp_session) -> None:
-    workspace, _ = agent_env
+def test_read_only_tool_executes_without_approval(agent_env) -> None:
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call("read_range", {"path": "销售表.xlsx", "sheet_name": "销售", "start_cell": "A1", "end_cell": "B2"}),
@@ -104,7 +114,7 @@ def test_read_only_tool_executes_without_approval(agent_env, temp_session) -> No
         client = McpOfficeClient(workspace_root=__import__("app.config", fromlist=["get_settings"]).get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -133,8 +143,8 @@ def test_read_only_tool_executes_without_approval(agent_env, temp_session) -> No
     assert payload["data"]["values"][0] == ["产品", "销售额"]
 
 
-def test_destructive_tool_is_gated_and_does_not_write(agent_env, temp_session) -> None:
-    workspace, directory = agent_env
+def test_destructive_tool_is_gated_and_does_not_write(agent_env) -> None:
+    workspace_id, directory = agent_env
     target = directory / "销售表.xlsx"
     before = target.read_bytes()
 
@@ -156,7 +166,7 @@ def test_destructive_tool_is_gated_and_does_not_write(agent_env, temp_session) -
         client = McpOfficeClient(workspace_root=__import__("app.config", fromlist=["get_settings"]).get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -171,8 +181,8 @@ def test_destructive_tool_is_gated_and_does_not_write(agent_env, temp_session) -
     assert target.read_bytes() == before
 
 
-def test_proposal_carries_a_diff_from_the_current_values(agent_env, temp_session) -> None:
-    workspace, _ = agent_env
+def test_proposal_carries_a_diff_from_the_current_values(agent_env) -> None:
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call(
@@ -191,7 +201,7 @@ def test_proposal_carries_a_diff_from_the_current_values(agent_env, temp_session
         client = McpOfficeClient(workspace_root=__import__("app.config", fromlist=["get_settings"]).get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -202,10 +212,8 @@ def test_proposal_carries_a_diff_from_the_current_values(agent_env, temp_session
     assert diff == [{"cell": "B2", "before": 1000, "after": 2500}]
 
 
-def test_write_arguments_carry_a_digest_for_conflict_detection(
-    agent_env, temp_session
-) -> None:
-    workspace, _ = agent_env
+def test_write_arguments_carry_a_digest_for_conflict_detection(agent_env) -> None:
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call(
@@ -226,23 +234,20 @@ def test_write_arguments_carry_a_digest_for_conflict_detection(
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            runtime = _runtime(workspace_id)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=runtime)
             await _run(agent)
+            return runtime
         finally:
             await client.stop()
 
-    asyncio.run(scenario())
-    from sqlalchemy import select
-
-    from app.models import Operation
-
-    operation = temp_session.scalar(select(Operation))
-    assert operation is not None
-    assert len(operation.arguments.get("expected_digest", "")) == 64
+    runtime = asyncio.run(scenario())
+    assert len(runtime.proposals) == 1
+    assert len(runtime.proposals[0]["arguments"].get("expected_digest", "")) == 64
 
 
-def test_unknown_tool_reports_an_error_without_crashing(agent_env, temp_session) -> None:
-    workspace, _ = agent_env
+def test_unknown_tool_reports_an_error_without_crashing(agent_env) -> None:
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [_call("nonexistent_tool", {"path": "x.xlsx"}), AIMessage(content="工具不可用。")]
     )
@@ -253,7 +258,7 @@ def test_unknown_tool_reports_an_error_without_crashing(agent_env, temp_session)
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -265,9 +270,9 @@ def test_unknown_tool_reports_an_error_without_crashing(agent_env, temp_session)
     assert "is not a valid tool" in results[0].data["content"]
 
 
-def test_iteration_ceiling_stops_a_looping_model(agent_env, temp_session, monkeypatch) -> None:
+def test_iteration_ceiling_stops_a_looping_model(agent_env, monkeypatch) -> None:
     """A model that keeps calling tools must be cut off rather than looping forever."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     from app.config import get_settings
 
     settings = get_settings()
@@ -281,7 +286,9 @@ def test_iteration_ceiling_stops_a_looping_model(agent_env, temp_session, monkey
         client = McpOfficeClient(workspace_root=settings.workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, settings=settings, llm=scripted)
+            agent = WorkspaceAgent(
+                client, settings, llm=scripted, runtime=_runtime(workspace_id)
+            )
             return await _run(agent)
         finally:
             await client.stop()
@@ -291,13 +298,13 @@ def test_iteration_ceiling_stops_a_looping_model(agent_env, temp_session, monkey
     assert len(scripted.calls) <= settings.agent_max_iterations + 1
 
 
-def test_ungrounded_answer_is_sent_back_for_a_fresh_read(agent_env, temp_session) -> None:
+def test_ungrounded_answer_is_sent_back_for_a_fresh_read(agent_env) -> None:
     """An answer with numbers but no tool call is replayed history, not a reading.
 
     Regression: after a file was replaced, the model answered from earlier turns
     ("the sheet only has a header") and the user got a confident wrong answer.
     """
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     stale = [("销售表.xlsx", "2026-01-01 12:00:00")]
     scripted = ScriptedLLM(
         [
@@ -313,7 +320,7 @@ def test_ungrounded_answer_is_sent_back_for_a_fresh_read(agent_env, temp_session
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent, stale_files=stale)
         finally:
             await client.stop()
@@ -336,9 +343,9 @@ def test_ungrounded_answer_is_sent_back_for_a_fresh_read(agent_env, temp_session
     assert done.data["content"] == "销售表里 A型 的销售额是 1000。"
 
 
-def test_greeting_without_numbers_is_not_forced_through_a_tool(agent_env, temp_session) -> None:
+def test_greeting_without_numbers_is_not_forced_through_a_tool(agent_env) -> None:
     """The freshness guard must not tax plain conversation."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     stale = [("销售表.xlsx", "2026-01-01 12:00:00")]
     scripted = ScriptedLLM([AIMessage(content="你好，我可以帮你查看工作区里的文档。")])
 
@@ -348,7 +355,7 @@ def test_greeting_without_numbers_is_not_forced_through_a_tool(agent_env, temp_s
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent, stale_files=stale)
         finally:
             await client.stop()
@@ -360,9 +367,9 @@ def test_greeting_without_numbers_is_not_forced_through_a_tool(agent_env, temp_s
     assert done.data["content"] == "你好，我可以帮你查看工作区里的文档。"
 
 
-def test_freshness_nudge_happens_at_most_once(agent_env, temp_session) -> None:
+def test_freshness_nudge_happens_at_most_once(agent_env) -> None:
     """A model that ignores the nudge must not loop forever."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     stale = [("销售表.xlsx", "2026-01-01 12:00:00")]
     scripted = ScriptedLLM(
         [
@@ -378,7 +385,7 @@ def test_freshness_nudge_happens_at_most_once(agent_env, temp_session) -> None:
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent, stale_files=stale)
         finally:
             await client.stop()
@@ -387,9 +394,9 @@ def test_freshness_nudge_happens_at_most_once(agent_env, temp_session) -> None:
     assert len(scripted.calls) == 2
 
 
-def test_empty_answer_is_asked_for_again(agent_env, temp_session) -> None:
+def test_empty_answer_is_asked_for_again(agent_env) -> None:
     """A reasoning-only finish must be retried rather than shown as an empty bubble."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call("list_files", {}),
@@ -404,7 +411,7 @@ def test_empty_answer_is_asked_for_again(agent_env, temp_session) -> None:
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -417,9 +424,9 @@ def test_empty_answer_is_asked_for_again(agent_env, temp_session) -> None:
     assert done.data["content"] == "工作区里有 销售表.xlsx。"
 
 
-def test_empty_answer_is_retried_only_once(agent_env, temp_session) -> None:
+def test_empty_answer_is_retried_only_once(agent_env) -> None:
     """A model that stays silent must not be nudged forever."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             AIMessage(content=""),
@@ -434,7 +441,7 @@ def test_empty_answer_is_retried_only_once(agent_env, temp_session) -> None:
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -446,15 +453,13 @@ def test_empty_answer_is_retried_only_once(agent_env, temp_session) -> None:
     assert done.data["content"] == ""
 
 
-def test_model_supplied_digest_is_overwritten_by_the_backend(
-    agent_env, temp_session
-) -> None:
+def test_model_supplied_digest_is_overwritten_by_the_backend(agent_env) -> None:
     """The backend owns expected_digest; a hallucinated model value must lose.
 
     Regression: the model copied a wrong digest into later write calls, and the
     setdefault kept it — poisoning the proposal into an unapplyable state.
     """
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     fake_digest = "c" * 64  # the model inventing a hash
     scripted = ScriptedLLM(
         [
@@ -477,19 +482,16 @@ def test_model_supplied_digest_is_overwritten_by_the_backend(
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            runtime = _runtime(workspace_id)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=runtime)
             await _run(agent)
+            return runtime
         finally:
             await client.stop()
 
-    asyncio.run(scenario())
-    from sqlalchemy import select
-
-    from app.models import Operation
-
-    operation = temp_session.scalar(select(Operation))
-    assert operation is not None
-    stored = operation.arguments["expected_digest"]
+    runtime = asyncio.run(scenario())
+    assert len(runtime.proposals) == 1
+    stored = runtime.proposals[0]["arguments"]["expected_digest"]
     assert stored != fake_digest
     assert len(stored) == 64
 
@@ -513,7 +515,7 @@ def test_unstructured_tool_error_is_a_failure_not_a_success() -> None:
 
 
 def test_fabricated_proposal_claim_is_sent_back_to_actually_call_the_tool(
-    agent_env, temp_session
+    agent_env,
 ) -> None:
     """A reply that claims a proposal without any write tool call is a fabrication.
 
@@ -522,7 +524,7 @@ def test_fabricated_proposal_claim_is_sent_back_to_actually_call_the_tool(
     the user's pending panel stayed empty. The agent must nudge once so the model
     actually performs the read + write.
     """
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             AIMessage(content="已提交删除提案：\n- **文件**：销售表.xlsx\n- **删除第 3 行**：B型"),
@@ -540,7 +542,7 @@ def test_fabricated_proposal_claim_is_sent_back_to_actually_call_the_tool(
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -562,7 +564,7 @@ def test_fabricated_proposal_claim_is_sent_back_to_actually_call_the_tool(
     )
 
 
-def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env, temp_session) -> None:
+def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env) -> None:
     """A write call naming a file the workspace does not have must not be recorded.
 
     Regression: the model once shortened 01-产品订单表.xlsx to 订单.xlsx; the
@@ -570,7 +572,7 @@ def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env, temp_sess
     file no longer exists'. The rejection now surfaces immediately so the model
     retries with the exact path from its earlier reads.
     """
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call(
@@ -599,7 +601,7 @@ def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env, temp_sess
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -612,9 +614,9 @@ def test_proposal_with_unknown_path_is_rejected_for_a_retry(agent_env, temp_sess
     assert proposals[0].data["path"] == "销售表.xlsx"
 
 
-def test_failed_read_carries_a_chinese_correction_hint(agent_env, temp_session) -> None:
+def test_failed_read_carries_a_chinese_correction_hint(agent_env) -> None:
     """Failed tool results are enriched with an actionable Chinese hint."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM(
         [
             _call("read_range", {"path": "不存在的表.xlsx", "sheet_name": "销售"}),
@@ -628,7 +630,7 @@ def test_failed_read_carries_a_chinese_correction_hint(agent_env, temp_session) 
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -643,14 +645,14 @@ def test_failed_read_carries_a_chinese_correction_hint(agent_env, temp_session) 
 
 
 def test_repeated_identical_failure_escalates_to_a_strategy_change(
-    agent_env, temp_session
+    agent_env,
 ) -> None:
     """Retrying the exact same failing call twice triggers an anti-spin directive.
 
     Without this, a model that keeps resubmitting wrong arguments burns the whole
     iteration ceiling on identical errors.
     """
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     bad_call = _call("read_range", {"path": "不存在的表.xlsx", "sheet_name": "销售"})
     scripted = ScriptedLLM([bad_call, bad_call, AIMessage(content="确实找不到。")])
 
@@ -660,7 +662,7 @@ def test_repeated_identical_failure_escalates_to_a_strategy_change(
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -672,9 +674,9 @@ def test_repeated_identical_failure_escalates_to_a_strategy_change(
     assert "连续失败" not in json.loads(results[0].data["content"])["error"]["hint"]
 
 
-def test_unchanged_files_allow_reusing_the_previous_answer(agent_env, temp_session) -> None:
+def test_unchanged_files_allow_reusing_the_previous_answer(agent_env) -> None:
     """With nothing changed on disk there is no reason to force another read."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
     scripted = ScriptedLLM([AIMessage(content="销售表中 A型 的销售额是 1000。")])
 
     async def scenario():
@@ -683,7 +685,7 @@ def test_unchanged_files_allow_reusing_the_previous_answer(agent_env, temp_sessi
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent, stale_files=[])
         finally:
             await client.stop()
@@ -695,37 +697,26 @@ def test_unchanged_files_allow_reusing_the_previous_answer(agent_env, temp_sessi
     assert done.data["content"] == "销售表中 A型 的销售额是 1000。"
 
 
-def test_list_files_only_reports_the_active_workspace(agent_env, temp_session) -> None:
+def test_list_files_only_reports_the_active_workspace(agent_env) -> None:
     """The sandbox root is shared by every workspace, but the model must not see it.
 
     Regression: ``list_files`` returned the whole tree, so a question about the
     current workspace also surfaced another workspace's copy of the same file —
     and stale files left on disk after a deletion — which the model then read.
     """
-    workspace, _ = agent_env
+    workspace_id, directory = agent_env
     from app.config import get_settings
-    from app.models import DocumentFile, IndexStatus
 
     settings = get_settings()
-    other = Workspace(name="另一个工作区")
-    temp_session.add(other)
-    temp_session.flush()
-    other_dir = settings.workspace_dir(other.id)
-    other_dir.mkdir(parents=True, exist_ok=True)
-    (other_dir / "销售表.xlsx").write_bytes((settings.workspace_dir(workspace.id) / "销售表.xlsx").read_bytes())
 
-    # A file that exists on disk but is not part of the workspace any more: the UI does
-    # not show it, so neither should the model.
-    (settings.workspace_dir(workspace.id) / "已删除的表.xlsx").write_bytes(b"stale")
-    temp_session.add(
-        DocumentFile(
-            workspace_id=workspace.id,
-            rel_path="销售表.xlsx",
-            kind="excel",
-            status=IndexStatus.indexed,
-        )
-    )
-    temp_session.flush()
+    # Another workspace's copy of the same file on the shared disk tree.
+    other_dir = settings.workspace_dir("ws-other")
+    other_dir.mkdir(parents=True, exist_ok=True)
+    (other_dir / "销售表.xlsx").write_bytes((directory / "销售表.xlsx").read_bytes())
+
+    # A file that exists on disk but is not tracked any more: the UI does not
+    # show it, so neither should the model (tracked_files comes from Java).
+    (directory / "已删除的表.xlsx").write_bytes(b"stale")
 
     scripted = ScriptedLLM(
         [
@@ -738,7 +729,7 @@ def test_list_files_only_reports_the_active_workspace(agent_env, temp_session) -
         client = McpOfficeClient(workspace_root=settings.workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()
@@ -752,8 +743,8 @@ def test_list_files_only_reports_the_active_workspace(agent_env, temp_session) -
     assert paths == ["销售表.xlsx"]
 
 
-def test_knowledge_tool_is_registered_alongside_mcp_tools(agent_env, temp_session) -> None:
-    workspace, _ = agent_env
+def test_knowledge_tool_is_registered_alongside_mcp_tools(agent_env) -> None:
+    workspace_id, _ = agent_env
 
     async def scenario():
         from app.config import get_settings
@@ -761,7 +752,9 @@ def test_knowledge_tool_is_registered_alongside_mcp_tools(agent_env, temp_sessio
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=ScriptedLLM([]))
+            agent = WorkspaceAgent(
+                client, llm=ScriptedLLM([]), runtime=_runtime(workspace_id)
+            )
             return [tool.name for tool in agent.build_tools()]
         finally:
             await client.stop()
@@ -772,9 +765,9 @@ def test_knowledge_tool_is_registered_alongside_mcp_tools(agent_env, temp_sessio
     assert "read_range" in names
 
 
-def test_knowledge_tool_result_is_parsed_into_citations(agent_env, temp_session, monkeypatch) -> None:
+def test_knowledge_tool_result_is_parsed_into_citations(agent_env, monkeypatch) -> None:
     """A retrieval call must surface citations to the UI."""
-    workspace, _ = agent_env
+    workspace_id, _ = agent_env
 
     class FakeRetriever:
         def __init__(self, *args, **kwargs) -> None:
@@ -817,7 +810,7 @@ def test_knowledge_tool_result_is_parsed_into_citations(agent_env, temp_session,
         client = McpOfficeClient(workspace_root=get_settings().workspaces_dir)
         await client.start()
         try:
-            agent = WorkspaceAgent(temp_session, workspace, client, llm=scripted)
+            agent = WorkspaceAgent(client, llm=scripted, runtime=_runtime(workspace_id))
             return await _run(agent)
         finally:
             await client.stop()

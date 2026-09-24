@@ -4,8 +4,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -13,29 +11,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 
 @pytest.fixture()
-def temp_session(tmp_path: Path):
-    """A throwaway database, independent of the application's configured one."""
-    from app.db import Base
-    from app import models  # noqa: F401  (register mappers before create_all)
-
-    engine = create_engine(
-        f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-    session = factory()
-    try:
-        yield session
-    finally:
-        session.close()
-        engine.dispose()
-
-
-@pytest.fixture()
 def file_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect file storage (workspaces + backups) into a temp tree."""
+    """Redirect file storage into a temp tree."""
     from app.config import get_settings
 
     root = tmp_path / "data"
@@ -88,47 +65,22 @@ def _no_small_model_calls(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def app_with_temp_storage(tmp_path, monkeypatch):
-    """The full app with storage, database, and the MCP sandbox in a temp tree.
+    """The app with its storage tree and the MCP sandbox in a temp directory.
 
-    The real MCP subprocess lifecycle runs; only the sandbox root is pointed at the
-    same temp tree the app writes into. The engine behind the session override is
-    exposed as ``app.state.test_session_factory`` so tests can seed rows (e.g. a
-    pending operation) the way the agent would.
+    There is no database behind the app anymore (app.db is owned exclusively
+    by backend-java); the ai-service is stateless, so tests that need a
+    workspace file drop it straight onto the temp storage tree — see
+    ``seed_workspace_file``.
     """
     from app.config import get_settings
-    from app.db import Base, get_session
     from app.main import create_app
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
 
     settings = get_settings()
     data_dir = tmp_path / "data"
     monkeypatch.setattr(settings, "data_dir", data_dir, raising=False)
     settings.ensure_directories()
 
-    engine = create_engine(
-        f"sqlite:///{(data_dir / 'api.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-    import app.models  # noqa: F401  (register mappers)
-
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-
-    def override_session():
-        session = factory()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
     app = create_app()
-    app.dependency_overrides[get_session] = override_session
     # The MCP sandbox must point at the same temp tree the app writes into. Patching
     # the parameter builder (rather than the client constructor) keeps the real
     # lifecycle code under test.
@@ -140,15 +92,20 @@ def app_with_temp_storage(tmp_path, monkeypatch):
         return real_builder(settings, workspace_root=settings.workspaces_dir)
 
     monkeypatch.setattr(mcp_client, "build_server_params", builder)
-
-    # NOTE: background tasks that open their own session via session_scope
-    # (trace persistence, memory compaction) still target the app's real
-    # database here — which makes them inert no-ops under test. Tests that need
-    # to read back what a background task wrote (see test_run_trace) patch
-    # ``app.api.routes.session_scope`` themselves; patching it globally makes
-    # the reindex-after-write task genuinely contend with request sessions on
-    # the single test SQLite file and trip "database is locked".
-
-    app.state.test_session_factory = factory
     yield app
-    engine.dispose()
+
+
+def seed_workspace_file(workspace_id: str, rel_path: str, content: bytes) -> Path:
+    """Drop a file into the (temp) storage tree the way Java's upload would.
+
+    The retired public upload endpoint used to create the row and the file in
+    one step; with persistence living in backend-java, tests stage files
+    directly on disk and, when an index is needed, drive ``POST /v1/index``.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    path = settings.workspace_dir(workspace_id) / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path

@@ -1,7 +1,8 @@
-"""Start the API on a scratch port, verify it comes up, then shut it down.
+"""Start the ai-service on a scratch port, verify it comes up, then shut it down.
 
-Useful as a pre-demo sanity check: it proves the MCP subprocess starts, the database
-initialises, and the HTTP surface answers.
+Useful as a pre-demo sanity check: it proves the MCP subprocess starts and the
+internal HTTP surface answers (backend-java is not involved — SQLite belongs to
+that side now).
 
     python scripts/check_server.py
 """

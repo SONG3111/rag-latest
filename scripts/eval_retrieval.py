@@ -196,17 +196,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
     from make_demo_data import build_document, build_workbook
 
-    from app import models  # noqa: F401  (register mappers)
     from app.config import get_settings
-    from app.db import Base
-    from app.models import Workspace
-    from app.retrieval.pipeline import Retriever
-    from app.services.files import index_file, save_upload
+    from app.retrieval.bm25 import token_counts
+    from app.retrieval.chunking import chunk_document_groups
+    from app.retrieval.pipeline import ChunkRecord, Retriever
 
     settings = get_settings()
     if args.rewrite and not settings.dashscope_api_key:
@@ -217,30 +212,58 @@ def main() -> int:
     settings.data_dir = tmp / "data"
     settings.ensure_directories()
 
-    engine = create_engine(
-        f"sqlite:///{(tmp / 'eval.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine, expire_on_commit=False, future=True)()
-
     try:
-        corpus = tmp / "corpus"
-        build_workbook(corpus / SHEET)
-        build_document(corpus / DOC)
+        # 语料构造走 corpus_loader 的内存模式（与 tests/test_retrieval.py::_corpus
+        # 相同）：chunk 的持久化归 backend-java，评测只关心 (files, chunks) 形状。
+        corpus_dir = tmp / "corpus"
+        build_workbook(corpus_dir / SHEET)
+        build_document(corpus_dir / DOC)
 
-        workspace = Workspace(name="评测")
-        session.add(workspace)
-        session.flush()
-        for path in sorted(corpus.iterdir()):
-            record = save_upload(session, workspace, path.name, path.read_bytes())
-            result = index_file(session, workspace.id, record)
-            if result.chunk_count == 0:
-                print(f"warning: {path.name} produced no chunks")
-        session.flush()
+        file_ids = {SHEET: "f-sheet", DOC: "f-doc"}
+        records: list[ChunkRecord] = []
+        for path in sorted(corpus_dir.iterdir()):
+            rel_path = path.name
+            file_id = file_ids[rel_path]
+            groups = chunk_document_groups(path, rel_path)
+            if not groups:
+                print(f"warning: {rel_path} produced no chunks")
+            for ordinal, group in enumerate(groups):
+                parent_id = f"{file_id}-p{ordinal}"
+                parent_counts = token_counts(group.parent.text)
+                records.append(
+                    ChunkRecord(
+                        id=parent_id,
+                        file_id=file_id,
+                        parent_id=None,
+                        level="parent",
+                        text=group.parent.text,
+                        location=group.parent.location,
+                        meta=group.parent.meta,
+                        token_counts=parent_counts,
+                        token_length=sum(parent_counts.values()),
+                    )
+                )
+                for child in group.children:
+                    child_counts = token_counts(child.text)
+                    records.append(
+                        ChunkRecord(
+                            id=(
+                                f"{parent_id}-"
+                                f"{child.meta.get('row', child.meta.get('part', 0))}"
+                            ),
+                            file_id=file_id,
+                            parent_id=parent_id,
+                            level="child",
+                            text=child.text,
+                            location=child.location,
+                            meta=child.meta,
+                            token_counts=child_counts,
+                            token_length=sum(child_counts.values()),
+                        )
+                    )
+        corpus = ({file_id: rel for rel, file_id in file_ids.items()}, records)
 
-        retriever = Retriever(session, workspace.id)
+        retriever = Retriever("eval", corpus_loader=lambda: corpus)
 
         rows: list[dict] = []
         by_category: dict[str, list[dict]] = {}
@@ -381,8 +404,6 @@ def main() -> int:
 
         return 0
     finally:
-        session.close()
-        engine.dispose()
         settings.data_dir = original_data_dir
 
 

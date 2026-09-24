@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "ai-service"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 # Fixed mirrors for the CMRC 2018 dev snapshot; hosts are validated against
@@ -604,36 +604,14 @@ def structural_stats(children: list[Child], parents: list[Parent], *, size: int,
 # --------------------------------------------------------------------------- #
 # equivalence check against the real pipeline
 # --------------------------------------------------------------------------- #
-class FakeEmbeddings:
-    """Deterministic vectors sized for the collection; only the BM25 leg is under test."""
-
-    dimensions = 1024
-
-    def _vector(self, text: str) -> list[float]:
-        raw = (hashlib.sha256(text.encode("utf-8")).digest() * 64)[: self.dimensions]
-        return [(b / 255.0) for b in raw]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._vector(t) for t in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._vector(text)
-
-
 def equivalence_check(
     corpus_dir: Path, cases: list[Case], *, size: int, overlap: int, model_path: str
 ) -> dict:
     """Run the real Retriever (BM25-only) on a sample; compare with fast path."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    from app import models  # noqa: F401
     from app.config import Settings
-    from app.db import Base
-    from app.models import Workspace
-    from app.retrieval.bm25 import BM25Index
-    from app.retrieval.pipeline import Retriever
-    from app.services.files import index_file, save_upload
+    from app.retrieval.bm25 import BM25Index, token_counts
+    from app.retrieval.chunking import chunk_document_groups
+    from app.retrieval.pipeline import ChunkRecord, Retriever
 
     with tempfile.TemporaryDirectory(prefix="rag-equiv-") as tmp:
         data_dir = Path(tmp) / "data"
@@ -646,11 +624,6 @@ def equivalence_check(
             query_rewrite_enabled=False,
         )
         settings.ensure_directories()
-        engine = create_engine(
-            f"sqlite:///{(Path(tmp) / 'equiv.db').as_posix()}", future=True
-        )
-        Base.metadata.create_all(engine)
-        session = sessionmaker(bind=engine, expire_on_commit=False, future=True)()
 
         sample_names = {
             "员工费用报销管理制度.docx",
@@ -660,22 +633,58 @@ def equivalence_check(
         sample_files = sorted(
             p for p in corpus_dir.iterdir() if p.name in sample_names
         )
-        workspace = Workspace(name="equiv")
-        session.add(workspace)
-        session.flush()
+        # 与 index_file 相同的分块路径，但语料留在内存里（chunk 持久化归
+        # backend-java，等价性检查只需要 corpus_loader 的形状）。
+        records: list[ChunkRecord] = []
+        files: dict[str, str] = {}
         for path in sample_files:
-            record = save_upload(session, workspace, path.name, path.read_bytes())
-            index_file(
-                session,
-                workspace.id,
-                record,
-                settings=settings,
-                embeddings=FakeEmbeddings(),
-            )
-        session.flush()
+            file_id = f"f-{len(files)}"
+            files[file_id] = path.name
+            for ordinal, group in enumerate(
+                chunk_document_groups(
+                    path,
+                    path.name,
+                    chunk_size_tokens=size,
+                    chunk_overlap_tokens=overlap,
+                )
+            ):
+                parent_id = f"{file_id}-p{ordinal}"
+                parent_counts = token_counts(group.parent.text)
+                records.append(
+                    ChunkRecord(
+                        id=parent_id,
+                        file_id=file_id,
+                        parent_id=None,
+                        level="parent",
+                        text=group.parent.text,
+                        location=group.parent.location,
+                        meta=group.parent.meta,
+                        token_counts=parent_counts,
+                        token_length=sum(parent_counts.values()),
+                    )
+                )
+                for child in group.children:
+                    child_counts = token_counts(child.text)
+                    records.append(
+                        ChunkRecord(
+                            id=(
+                                f"{parent_id}-"
+                                f"{child.meta.get('row', child.meta.get('part', 0))}"
+                            ),
+                            file_id=file_id,
+                            parent_id=parent_id,
+                            level="child",
+                            text=child.text,
+                            location=child.location,
+                            meta=child.meta,
+                            token_counts=child_counts,
+                            token_length=sum(child_counts.values()),
+                        )
+                    )
+        corpus = (files, records)
 
-        # index_file's tokenizer selection reads the *global* settings, so the
-        # fast path must measure in the same mode the global settings imply.
+        # The fast path must measure in the mode the *global* settings imply,
+        # because chunking's tokenizer selection reads the global configuration.
         global_path = ""
         from app.config import get_settings as _gs
 
@@ -695,7 +704,7 @@ def equivalence_check(
         index = BM25Index(children)
 
         retriever = Retriever(
-            session, workspace.id, settings=settings, embeddings=FakeEmbeddings()
+            "equiv", settings=settings, corpus_loader=lambda: corpus
         )
         sample_cases = [c for c in cases if c.file in sample_names][:12]
 
@@ -711,8 +720,6 @@ def equivalence_check(
                 mismatches.append(
                     {"query": case.query, "real": real_keys[:3], "fast": fast_keys[:3]}
                 )
-        session.close()
-        engine.dispose()
         return {
             "checked": len(sample_cases),
             "mismatches": len(mismatches),

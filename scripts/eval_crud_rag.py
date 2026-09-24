@@ -14,7 +14,7 @@ sweep needs no 3,000-file ingestion):
 1. Every txt is wrapped as a one-paragraph docx — the format production actually
    parses — and chunked by the real ``chunk_word_groups`` per (size, overlap) config.
 2. Children are embedded with the production embedding model (local bge-m3, the
-   same weights ``index_file`` uses), cached to ``data/rag-eval/crud-cache/`` keyed
+   same weights ``/v1/index`` uses), cached to ``data/rag-eval/crud-cache/`` keyed
    by config so re-runs only pay for new configs.
 3. Modes, all fingerprint-deduped like the pipeline:
    ``bm25``  — sparse leg only.
@@ -28,7 +28,7 @@ sweep needs no 3,000-file ingestion):
    would grade paraphrase, not retrieval.
 5. Two cheap side-sweeps at the production config: RRF weight variants (no model
    calls) and rerank-candidate counts (batched cloud rerank).
-6. An equivalence check runs the *real* ``Retriever`` (SQLite + Qdrant) on a
+6. An equivalence check runs the *real* ``Retriever`` (corpus_loader + Qdrant) on a
    12-file sub-workspace and compares hit lists with the fast path.
 
 The rerank leg defaults to the DashScope text-rerank API (batched, scores are
@@ -398,22 +398,20 @@ def _mode_names(rerank: str | None) -> list[str]:
 def equivalence_check(
     docx_files: list[Path], queries: list[Query], *, size: int, overlap: int
 ) -> dict:
-    """Run the real Retriever (SQLite + Qdrant) on a small workspace; compare.
+    """Run the real Retriever (corpus_loader + Qdrant) on a small workspace; compare.
 
     Compares the hybrid (no rerank) ordering: both paths must apply the same
     fingerprint dedupe and the same RRF weights over the same chunk texts.
     """
     import tempfile
+    import uuid
 
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    from app import models  # noqa: F401 — register mappers
     from app.config import Settings
-    from app.db import Base
-    from app.models import Workspace
-    from app.retrieval.pipeline import Retriever
-    from app.services.files import index_file, save_upload
+    from app.llm.providers import build_embeddings
+    from app.retrieval.bm25 import token_counts
+    from app.retrieval.chunking import chunk_document_groups
+    from app.retrieval.pipeline import ChunkRecord, Retriever
+    from app.retrieval.vector_store import VectorStore
 
     sample_names = {q.label_file for q in queries[:12]}
     sample_files = sorted(p for p in docx_files if p.name in sample_names)
@@ -426,18 +424,76 @@ def equivalence_check(
             query_rewrite_enabled=False,
         )
         settings.ensure_directories()
-        engine = create_engine(f"sqlite:///{(Path(tmp) / 'equiv.db').as_posix()}", future=True)
-        Base.metadata.create_all(engine)
-        session = sessionmaker(bind=engine, expire_on_commit=False, future=True)()
-        workspace = Workspace(name="crud-equiv")
-        session.add(workspace)
-        session.flush()
-        for path in sample_files:
-            record = save_upload(session, workspace, path.name, path.read_bytes())
-            index_file(session, workspace.id, record, settings=settings)
-        session.flush()
 
-        retriever = Retriever(session, workspace.id, settings=settings)
+        # 与 /v1/index 相同的分块与稠密索引路径，但 chunk 行留在内存里
+        # （持久化归 backend-java），检索语料经 corpus_loader 注入。
+        workspace_id = "crud-equiv"
+        records: list[ChunkRecord] = []
+        files: dict[str, str] = {}
+        child_ids: list[str] = []
+        child_texts: list[str] = []
+        payloads: list[dict] = []
+        for path in sample_files:
+            file_id = f"f-{len(files)}"
+            files[file_id] = path.name
+            for ordinal, group in enumerate(
+                chunk_document_groups(
+                    path,
+                    path.name,
+                    chunk_size_tokens=size,
+                    chunk_overlap_tokens=overlap,
+                )
+            ):
+                parent_id = uuid.uuid4().hex
+                parent_counts = token_counts(group.parent.text)
+                records.append(
+                    ChunkRecord(
+                        id=parent_id,
+                        file_id=file_id,
+                        parent_id=None,
+                        level="parent",
+                        text=group.parent.text,
+                        location=group.parent.location,
+                        meta=group.parent.meta,
+                        token_counts=parent_counts,
+                        token_length=sum(parent_counts.values()),
+                    )
+                )
+                for child in group.children:
+                    child_counts = token_counts(child.text)
+                    child_id = uuid.uuid4().hex
+                    records.append(
+                        ChunkRecord(
+                            id=child_id,
+                            file_id=file_id,
+                            parent_id=parent_id,
+                            level="child",
+                            text=child.text,
+                            location=child.location,
+                            meta=child.meta,
+                            token_counts=child_counts,
+                            token_length=sum(child_counts.values()),
+                        )
+                    )
+                    child_ids.append(child_id)
+                    child_texts.append(child.text)
+                    payloads.append(
+                        {"file_id": file_id, "rel_path": path.name}
+                    )
+        corpus = (files, records)
+
+        store = VectorStore(settings)
+        store.drop_collection(workspace_id)
+        store.upsert_vectors(
+            workspace_id,
+            child_ids,
+            build_embeddings(settings).embed_documents(child_texts),
+            payloads,
+        )
+
+        retriever = Retriever(
+            workspace_id, settings=settings, corpus_loader=lambda: corpus
+        )
         children, parents = build_index(docx_files, size=size, overlap=overlap)
         children = [c for c in children if c.rel_path in sample_names]
         by_id = {child.id: child for child in children}
@@ -464,8 +520,7 @@ def equivalence_check(
             ]
             if real_keys != fast_keys:
                 mismatches.append({"query": query.query, "real": real_keys[:3], "fast": fast_keys[:3]})
-        session.close()
-        engine.dispose()
+        store.drop_collection(workspace_id)
     return {"checked": len(sub_queries), "mismatches": len(mismatches), "detail": mismatches[:3]}
 
 

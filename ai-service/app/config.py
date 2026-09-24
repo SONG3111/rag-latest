@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     )
 
     # --- storage ---
+    # SQLite (app.db) is owned exclusively by backend-java; the ai-service keeps
+    # no relational state, only the workspace/qdrant trees under data_dir.
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
-    database_url: str | None = None
 
     # --- models ---
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
@@ -198,18 +199,8 @@ class Settings(BaseSettings):
         return self.data_dir / "workspaces"
 
     @property
-    def backups_dir(self) -> Path:
-        return self.data_dir / "backups"
-
-    @property
     def qdrant_dir(self) -> Path:
         return self.data_dir / "qdrant"
-
-    @property
-    def effective_database_url(self) -> str:
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{(self.data_dir / 'app.db').as_posix()}"
 
     @property
     def effective_embedding_base_url(self) -> str:
@@ -219,10 +210,10 @@ class Settings(BaseSettings):
         return self.workspaces_dir / workspace_id
 
     def ensure_directories(self) -> None:
+        # backups/ 由 backend-java 的 BackupService 负责创建与清理。
         for path in (
             self.data_dir,
             self.workspaces_dir,
-            self.backups_dir,
             self.qdrant_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

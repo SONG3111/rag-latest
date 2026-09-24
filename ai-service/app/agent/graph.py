@@ -36,7 +36,6 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import NodeCancelledError
 from langgraph.graph.message import RemoveMessage, add_messages
-from sqlalchemy.orm import Session
 
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolInvocationError
@@ -44,16 +43,14 @@ from pydantic import ValidationError
 
 from ..config import Settings, get_settings
 from ..mcp_client import McpOfficeClient, parse_tool_result
-from ..models import Operation, Workspace
 from ..retrieval.pipeline import Corpus, Retriever
-from ..services.spill import spill_tool_result
 from ..services.operations import (
     build_tool_arguments,
-    create_operation,
     extract_target_path,
     summarize_operation,
     workspace_relative_path,
 )
+from ..services.spill import spill_tool_result
 from .prompts import (
     EMPTY_ANSWER_NUDGE,
     FRESHNESS_NUDGE,
@@ -259,17 +256,16 @@ def _summarize_tool_call(name: str, args: dict[str, Any]) -> str:
 
 @dataclass
 class AgentRuntime:
-    """Everything the stateless chat endpoint passes in instead of a DB session.
+    """The per-turn facts the graph needs, handed in by the stateless chat endpoint.
 
-    In the split deployment backend-java owns persistence, so the agent runs
-    with ``session=None``/``workspace=None`` and this runtime carries the
-    per-turn facts the graph would otherwise read from SQLite:
+    backend-java owns persistence, so the agent always runs stateless and this
+    runtime carries what the graph would otherwise read from SQLite:
 
     * ``tracked_files`` replaces the DocumentFile query behind ``_scope_listing``;
     * ``corpus_loader`` replaces the Retriever's session (one internal HTTP
       call per search, served by Java's retrieval-corpus endpoint);
-    * ``proposals`` replaces ``create_operation``'s DB write: write tools only
-      collect specs here, and Java creates the durable Operation rows when it
+    * ``proposals`` replaces the proposal DB write: write tools only collect
+      specs here, and Java creates the durable Operation rows when it
       intercepts the proposal frames;
     * the ``memory_*`` fields carry the conversation's rolling-summary state so
       the overflow path can run the pure compaction function, with any forced
@@ -295,18 +291,14 @@ class WorkspaceAgent:
 
     def __init__(
         self,
-        session: Session = None,
-        workspace: Workspace = None,
         client: McpOfficeClient = None,
         settings: Settings | None = None,
         *,
         llm=None,
         runtime: AgentRuntime | None = None,
     ) -> None:
-        if session is None and runtime is None:
-            raise ValueError("either a session or a runtime is required")
-        self.session = session
-        self.workspace = workspace
+        if runtime is None:
+            raise ValueError("a runtime is required (persistence lives in backend-java)")
         self.client = client
         self.settings = settings or get_settings()
         self.runtime = runtime
@@ -327,9 +319,6 @@ class WorkspaceAgent:
 
     @property
     def _workspace_id(self) -> str:
-        """Workspace id from the ORM object, or the stateless runtime."""
-        if self.workspace is not None:
-            return self.workspace.id
         return self.runtime.workspace_id
 
     # ------------------------------------------------------------------ #
@@ -354,20 +343,15 @@ class WorkspaceAgent:
 
     def _knowledge_tool(self) -> BaseTool:
         """Wrap retrieval as a tool so the agent decides when to search."""
-        session = self.session
         workspace_id = self._workspace_id
         settings = self.settings
         agent = self
 
         def _search(query: str, top_k: int = 5) -> str:
-            if agent.runtime is not None:
-                # 无状态模式：语料经内部端点从 backend-java 读取，session 为 None。
-                retriever = Retriever(
-                    None, workspace_id, settings,
-                    corpus_loader=agent.runtime.corpus_loader,
-                )
-            else:
-                retriever = Retriever(session, workspace_id, settings)
+            # 语料经内部端点从 backend-java 读取（每次 search 一次回读）。
+            retriever = Retriever(
+                workspace_id, settings, corpus_loader=agent.runtime.corpus_loader
+            )
             hits = retriever.search(
                 query, top_k=top_k, history=agent._history, trace=agent._trace
             )
@@ -465,50 +449,30 @@ class WorkspaceAgent:
                     "请改用本轮 list_files / read_range 返回的确切路径重新提交提案"
                 )
             diff = await agent._read_before_values(name, enriched)
-            if agent.runtime is not None:
-                # 无状态模式：不写库。spec 收进 runtime，信封带全 arguments，
-                # tools_node 的 proposal 事件由此取全字段；operation_id 为 null，
-                # 由 Java 拦截帧时生成并替换后再落库转发。
-                summary = summarize_operation(name, rel_path, enriched)
-                agent.runtime.proposals.append(
-                    {
-                        "tool_name": name,
-                        "rel_path": rel_path,
-                        "arguments": enriched,
-                        "diff": diff,
-                        "summary": summary,
-                    }
-                )
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "data": {
-                            "status": "pending_user_approval",
-                            "operation_id": None,
-                            "tool": name,
-                            "path": rel_path,
-                            "summary": summary,
-                            "diff": diff,
-                            "arguments": enriched,
-                        },
-                        "note": "该修改已提交为待确认提案，尚未写入文件。",
-                    },
-                    ensure_ascii=False,
-                )
-            operation = create_operation(
-                agent.session, agent.workspace.id, name, enriched, diff=diff
+            # 不写库：spec 收进 runtime，信封带全 arguments，tools_node 的
+            # proposal 事件由此取全字段；operation_id 为 null，由 Java 拦截帧时
+            # 生成并替换后再落库转发。
+            summary = summarize_operation(name, rel_path, enriched)
+            agent.runtime.proposals.append(
+                {
+                    "tool_name": name,
+                    "rel_path": rel_path,
+                    "arguments": enriched,
+                    "diff": diff,
+                    "summary": summary,
+                }
             )
-            agent.session.flush()
             return json.dumps(
                 {
                     "ok": True,
                     "data": {
                         "status": "pending_user_approval",
-                        "operation_id": operation.id,
+                        "operation_id": None,
                         "tool": name,
-                        "path": operation.rel_path,
-                        "summary": operation.summary,
+                        "path": rel_path,
+                        "summary": summary,
                         "diff": diff,
+                        "arguments": enriched,
                     },
                     "note": "该修改已提交为待确认提案，尚未写入文件。",
                 },
@@ -542,22 +506,9 @@ class WorkspaceAgent:
             return payload
 
         # Intersect with the user's own file list. The model should see exactly what
-        # the workspace shows in the UI, not whatever bytes happen to sit on disk.
-        if self.runtime is not None:
-            tracked = set(self.runtime.tracked_files)
-        else:
-            from sqlalchemy import select
-
-            from ..models import DocumentFile
-
-            tracked = {
-                row.rel_path
-                for row in self.session.scalars(
-                    select(DocumentFile).where(
-                        DocumentFile.workspace_id == self.workspace.id
-                    )
-                )
-            }
+        # the workspace shows in the UI, not whatever bytes happen to sit on disk
+        # (the list arrives as ``runtime.tracked_files`` from backend-java).
+        tracked = set(self.runtime.tracked_files)
 
         prefix = f"{self._workspace_id}/"
         scoped: list[dict[str, Any]] = []
@@ -974,44 +925,29 @@ class WorkspaceAgent:
         The provider confirmed the request was too large, so the normal trigger
         is bypassed and the keep budget halves (dsh compaction-basic: overflow
         "may force a useful balanced reduction even below the normal
-        threshold"). Moving the bookmark means the *next* turn's history starts
-        slim; this turn shrinks in memory instead. Runs on the cheap rewrite
-        channel and fails open — a failed fold still leaves the in-memory head
-        reduction for the retry.
+        threshold"). The folded summary is written back through the runtime so
+        the persist frame hands the moved bookmark to backend-java; this turn
+        shrinks in memory instead. Runs on the cheap rewrite channel and fails
+        open — a failed fold still leaves the in-memory head reduction for the
+        retry.
         """
-        from ..services.memory import compact_memory
-
-        if self.runtime is not None:
-            # 无状态模式：请求侧消息快照上跑纯压缩函数，结果回写 runtime，
-            # persist 帧带给 Java 落 conversation_summaries。
-            from ..services.memory import compute_compaction
-
-            try:
-                result = compute_compaction(
-                    self.runtime.memory_rows,
-                    self.runtime.memory_summary,
-                    self.runtime.memory_covered,
-                    self.settings,
-                    force=True,
-                )
-            except Exception as exc:
-                logger.warning("emergency compaction before overflow retry failed: %s", exc)
-                return False
-            if result is None:
-                return False
-            self.runtime.forced_summary, self.runtime.forced_covered = result
-            return True
+        from ..services.memory import compute_compaction
 
         try:
-            compacted = compact_memory(
-                self.session, self.workspace.id, self.settings, force=True
+            result = compute_compaction(
+                self.runtime.memory_rows,
+                self.runtime.memory_summary,
+                self.runtime.memory_covered,
+                self.settings,
+                force=True,
             )
-            self.session.commit()
-            return compacted
         except Exception as exc:
             logger.warning("emergency compaction before overflow retry failed: %s", exc)
-            self.session.rollback()
             return False
+        if result is None:
+            return False
+        self.runtime.forced_summary, self.runtime.forced_covered = result
+        return True
 
     async def astream(
         self,

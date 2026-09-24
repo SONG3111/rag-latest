@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import io
-
 import pytest
 from docx import Document
 from openpyxl import Workbook
 
-from app.models import Workspace
 from app.retrieval.bm25 import BM25Index, reciprocal_rank_fusion, tokenize
 from app.retrieval.chunking import (
     chunk_document,
@@ -16,8 +13,7 @@ from app.retrieval.chunking import (
     chunk_excel_groups,
     chunk_word_groups,
 )
-from app.retrieval.pipeline import Retriever, format_context
-from app.services.files import index_file, save_upload
+from app.retrieval.pipeline import ChunkRecord, Retriever, format_context
 
 
 def test_tokenize_splits_chinese_and_latin() -> None:
@@ -560,17 +556,13 @@ def test_chunk_overlap_must_fit_inside_the_chunk_budget() -> None:
     assert Settings(chunk_size_tokens=512, chunk_overlap_tokens=64).chunk_overlap_tokens == 64
 
 
-def _seed(session, tmp_path, monkeypatch):
-    """Create a workspace with one Excel and one Word file, indexed via BM25 only."""
-    from app.config import get_settings
+def _corpus(tmp_path) -> tuple[dict[str, str], list[ChunkRecord]]:
+    """Chunk one Excel + one Word file the way /v1/index would, in memory.
 
-    settings = get_settings()
-    monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
-    settings.ensure_directories()
-
-    workspace = Workspace(name="检索")
-    session.add(workspace)
-    session.flush()
+    backend-java owns chunk persistence; the retriever only ever sees the
+    (files, chunks) shape a corpus loader returns, so tests build it directly.
+    """
+    from app.retrieval.bm25 import token_counts
 
     book = Workbook()
     sheet = book.active
@@ -578,55 +570,78 @@ def _seed(session, tmp_path, monkeypatch):
     sheet.append(["产品", "区域", "销售额"])
     sheet.append(["A型", "华东", 1000])
     sheet.append(["B型", "华北", 2000])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    record = save_upload(session, workspace, "销售表.xlsx", buffer.getvalue())
-    index_file(session, workspace.id, record)
+    excel_path = tmp_path / "销售表.xlsx"
+    book.save(excel_path)
 
     document = Document()
     document.add_heading("报销制度", level=1)
     document.add_paragraph("第二条 单笔报销金额不得超过 5000 元。")
-    buffer = io.BytesIO()
-    document.save(buffer)
-    record = save_upload(session, workspace, "制度.docx", buffer.getvalue())
-    index_file(session, workspace.id, record)
+    word_path = tmp_path / "制度.docx"
+    document.save(str(word_path))
 
-    session.flush()
-    return workspace
+    records: list[ChunkRecord] = []
+    file_ids = {"销售表.xlsx": "f-excel", "制度.docx": "f-word"}
+    for path, rel_path in ((excel_path, "销售表.xlsx"), (word_path, "制度.docx")):
+        for group in chunk_document_groups(path, rel_path):
+            parent_id = f"{file_ids[rel_path]}-p"
+            parent_counts = token_counts(group.parent.text)
+            records.append(
+                ChunkRecord(
+                    id=parent_id,
+                    file_id=file_ids[rel_path],
+                    parent_id=None,
+                    level="parent",
+                    text=group.parent.text,
+                    location=group.parent.location,
+                    meta=group.parent.meta,
+                    token_counts=parent_counts,
+                    token_length=sum(parent_counts.values()),
+                )
+            )
+            for child in group.children:
+                child_counts = token_counts(child.text)
+                records.append(
+                    ChunkRecord(
+                        id=f"{parent_id}-{child.meta.get('row', child.meta.get('part', 0))}",
+                        file_id=file_ids[rel_path],
+                        parent_id=parent_id,
+                        level="child",
+                        text=child.text,
+                        location=child.location,
+                        meta=child.meta,
+                        token_counts=child_counts,
+                        token_length=sum(child_counts.values()),
+                    )
+                )
+    return {file_id: rel for rel, file_id in file_ids.items()}, records
 
 
-def test_keyword_retrieval_finds_the_governing_clause(
-    temp_session, tmp_path, monkeypatch
-) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    retriever = Retriever(temp_session, workspace.id)
+def test_keyword_retrieval_finds_the_governing_clause(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    retriever = Retriever("ws", corpus_loader=lambda: corpus)
     hits = retriever.search("报销上限", use_dense=False, use_rerank=False)
     assert hits
     assert hits[0].rel_path == "制度.docx"
     assert "5000" in hits[0].text
 
 
-def test_keyword_retrieval_finds_table_rows(
-    temp_session, tmp_path, monkeypatch
-) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    retriever = Retriever(temp_session, workspace.id)
+def test_keyword_retrieval_finds_table_rows(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    retriever = Retriever("ws", corpus_loader=lambda: corpus)
     hits = retriever.search("华北", use_dense=False, use_rerank=False)
     assert hits
     assert hits[0].rel_path == "销售表.xlsx"
     assert hits[0].location.startswith("销售!")
 
 
-def test_retrieval_on_empty_workspace_returns_nothing(temp_session) -> None:
-    workspace = Workspace(name="空")
-    temp_session.add(workspace)
-    temp_session.flush()
-    assert Retriever(temp_session, workspace.id).search("任意问题") == []
+def test_retrieval_on_empty_workspace_returns_nothing() -> None:
+    corpus = ({}, [])
+    assert Retriever("ws", corpus_loader=lambda: corpus).search("任意问题") == []
 
 
-def test_blank_query_is_ignored(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    assert Retriever(temp_session, workspace.id).search("   ", use_dense=False) == []
+def test_blank_query_is_ignored(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    assert Retriever("ws", corpus_loader=lambda: corpus).search("   ", use_dense=False) == []
 
 
 def test_format_context_marks_sources() -> None:

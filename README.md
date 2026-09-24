@@ -119,14 +119,15 @@ LangChain 并不会透出（`additional_kwargs` 为空），无法显示给用�
 | 层 | 选型 | 备注 |
 |---|---|---|
 | 前端 | Vue 3 + Vite + TypeScript + Pinia + Ant Design Vue | SSE 流式渲染工具调用过程 |
-| 后端 | Python 3.11/3.12 + FastAPI + SQLAlchemy | SSE 用 `sse-starlette` |
+| 业务后端 | Java 21 + Spring Boot（backend-java/） | 对外 8000，REST/SSE 网关 + SQLite 独占 |
+| AI 服务 | Python 3.11/3.12 + FastAPI（ai-service/，无状态） | 内网 8001，SSE 用 `sse-starlette` |
 | Agent | LangGraph（单 Agent + 工具循环） | 迭代次数有上限，防止死循环 |
 | LLM | 百炼 `qwen-plus`（OpenAI 兼容模式） | 改 `LLM_MODEL` 即可换模型 |
 | Embedding | **本地** `BAAI/bge-m3`（1024 维） | 权重在本地，建索引不出网 |
 | Reranker | **本地** `BAAI/bge-reranker-v2-m3` | 交叉编码器，本地推理 |
 | 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 22 个工具（7 只读 + 15 写入需审批） |
 | 向量库 | Qdrant local（嵌入式） | 每个工作区一个 collection |
-| 关系库 | SQLite | 工作区 / 文件 / 消息 / 操作审计 |
+| 关系库 | SQLite（仅 backend-java 打开） | 工作区 / 文件 / 消息 / 操作审计 |
 
 > LangGraph 只负责编排，不自带任何模型。LLM、embedding、rerank 分别由
 > `app/llm/providers.py` 的工厂函数产出，换供应商只改配置。

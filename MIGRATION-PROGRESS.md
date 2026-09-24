@@ -12,13 +12,13 @@
 | M0 骨架并行（分支/改名/Java 骨架/三服务 compose） | ✅ 完成 | `105e121`（纯改名）、`46315e3` |
 | M1 数据层 + CRUD + 内部 /v1 接缝 | ✅ 完成 | `078d7ee` |
 | M2 聊天链路（无状态化 + SSE 中继） | ✅ 完成 | `cd5720e` |
-| M3 审批全链路 + 索引编排 | ✅ 完成（未提交，待用户确认提交） | — |
-| M4 退役旧代码 + 文档 | ⬜ 未开始 | — |
+| M3 审批全链路 + 索引编排 | ✅ 完成 | `a2cc765` |
+| M4 退役旧代码 + 文档 | ✅ 完成 | `7610ee9` |
 
-当前分支 `feat/java-backend`（基于 `dev`）。M2 后两侧测试状态：
-**backend-java 25 用例全绿（新增 ChatStreamTests 7 用例）；ai-service 217 用例全绿**
-（含 9 个 M1 内部契约 + M2 新增 test_internal_chat_stream.py 5 用例与
-Retriever corpus_loader 2 用例）。
+当前分支 `feat/java-backend`（基于 `dev`）。M4 退役后三套件状态：
+**backend-java 83 用例全绿；ai-service 165 用例全绿（删 7 个旧 REST 套件文件后迁移
+收敛）；mcp-office-server 170 用例全绿**。ai-service 已无任何关系状态
+（sqlalchemy 从 requirements 移除，无 app.db 访问路径）。
 
 ## 二、已完成内容
 
@@ -236,7 +236,39 @@ ai-service 216、mcp-office-server 170 全绿。顺手修复：Boot 4 Environmen
   （还原备份）；上传/reindex 端点接 /v1/index；`OperationRepository`
 - 测试：Java 种子提案驱动 REST（对标 test_api_operations.py）+ Python rebase 单测 → 提交
 
-### M4
+### M4 ✅ 已全部实现（2026-09-25，退役旧 Python 后端代码）
+
+ai-service 收敛为 runtime-only：删掉一切被 Java 替代的代码，保留纯函数与 /v1 内部契约。
+
+**删除（app 层）：** `api/routes.py`、`api/schemas.py`、`db.py`、`models.py`、
+`migrations.py`、`services/backup.py`；config 去 database_url/backups_dir；
+requirements 去 sqlalchemy 与 mcp-office-server（Dockerfile 单独安装）；Dockerfile
+mkdir 去 backups。`compose_answer` 仍作为镜像函数留在 `services/answers.py`
+（↔ Java `Answers.java`）。
+
+**收敛：** `graph.py`/`pipeline.py` 去 session/models（AgentRuntime 必填；Retriever
+签名 `(workspace_id, settings, *, ..., corpus_loader)`）；bm25.py 去 models 导入
+（TYPE_CHECKING 改 ChunkRecord）；internal_chat 引用切 services.answers，并修复
+取消语义——LangGraph 把模型流中抛的 CancelledError 包成 NodeCancelledError，
+需与 asyncio.CancelledError 分开处理（后者上抛，前者优雅结束流、无 persist 帧）。
+
+**测试处置：** 删 7 个 Java 已覆盖的旧 REST 套件（test_api*.py、test_operations.py、
+test_proposal_rebase.py、test_migrations.py）；其余 11 个文件迁移到无状态模式
+（seed_workspace_file 落盘替代 DB、AgentRuntime/corpus_loader 构造、SSE 走
+/v1/chat/stream、断言 persist 帧）。
+
+**scripts：** eval_retrieval/eval_chunking/eval_crud_rag 的等价块改内存 corpus
+构造（与 test_retrieval.py::_corpus 同模式；eval_retrieval 验证 in-corpus 18/18
+与迁移前一致）；test_excel_mcp_live 改 runtime 模式（提案直接调 MCP 工具应用，
+即 Java 审批后的 /v1/tools/call 路径）；check_chat_http 改对运行中的 8000 栈；
+删 inspect_chunks.py（旧 schema 迁移期诊断，使命已结束）；路径修正
+check_proxy_bypass/test_chunking_live。
+
+**文档：** README 技术表拆业务后端/AI 服务两行；AGENTS.md 修正已删测试引用与
+用例数；docs/01 架构图与代码位置更新双进程；新增 docs/06-服务拆分与迁移.md
+（含参考来源：未找到可直接照搬的 Java+Python 混合 RAG 仓库，采用通用网关模式）。
+
+### M4 原清单（保留备查）
 
 - 删 ai-service 死代码：`api/routes.py` 旧 REST、db.py/models.py SQLAlchemy、migrations.py、
   services 中已迁移半边、requirements 瘦身；conftest 夹具相应收敛
@@ -285,8 +317,7 @@ ai-service 216、mcp-office-server 170 全绿。顺手修复：Boot 4 Environmen
 
 ## 六、当前未提交的工作区状态
 
-M2 已提交（`cd5720e` + `6473d86`）。当前未提交改动 = M3 全部代码（见 §四 M3 清单）
-+ 韧性容错层（ResilienceConfig/AiServiceClient 重试与熔断/SystemController）
-+ 零散修复（EnvironmentPostProcessor 废弃迁移、tsconfig baseUrl、created_at 归一化、
-404 语义）。三套件回归全绿：backend-java 83 / ai-service 216 / mcp-office-server 170。
-提交后把 §一 M3 行的提交号补上。
+M3 + 韧性容错层已提交并推送（`a2cc765`）。当前未提交改动 = **M4 全部内容**
+（见 §四 M4 清单：app 层删除与收敛、11 个测试文件无状态化迁移、scripts 处置、
+文档更新）。三套件回归全绿：backend-java 83 / ai-service 165 / mcp-office-server 170。
+提交 `7610ee9`，迁移四个里程碑全部落地。

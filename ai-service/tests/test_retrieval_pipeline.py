@@ -1,27 +1,29 @@
 """Retrieval behaviours added on top of the recall/fuse/rerank core.
 
 These run without an API key: the dense leg, the reranker, and the rewriter are all
-injected as fakes, which is also what makes them deterministic.
+injected as fakes, which is also what makes them deterministic. The corpus is
+built in memory (the shape backend-java's retrieval-corpus endpoint returns);
+there is no database behind the retriever any more.
 """
 
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from docx import Document
 from openpyxl import Workbook
 
-from app.models import Workspace
-from app.retrieval.bm25 import content_fingerprint
+from app.retrieval.bm25 import content_fingerprint, token_counts
+from app.retrieval.chunking import chunk_document_groups
 from app.retrieval.pipeline import (
     SCORE_SOURCE_FUSED,
     SCORE_SOURCE_RERANK,
+    ChunkRecord,
     Retriever,
 )
 from app.retrieval.rewriter import QueryRewriter, RewriteResult
-from app.services.files import index_file, save_upload
 
 
 # --------------------------------------------------------------------------- #
@@ -89,54 +91,70 @@ class FixedRewriter:
 
 
 # --------------------------------------------------------------------------- #
-# fixtures
+# corpus
 # --------------------------------------------------------------------------- #
-def _seed(session, tmp_path, monkeypatch):
-    from app.config import get_settings
+FILE_IDS = {"明细.xlsx": "f-excel", "制度.docx": "f-word"}
 
-    settings = get_settings()
-    monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
-    settings.ensure_directories()
 
-    workspace = Workspace(name="管线测试")
-    session.add(workspace)
-    session.flush()
-
+def _corpus(tmp_path: Path) -> tuple[dict[str, str], list[ChunkRecord]]:
+    """Chunk one Excel + one Word file the way /v1/index would, in memory."""
     book = Workbook()
     sheet = book.active
     sheet.title = "报销明细"
     sheet.append(["报销单号", "姓名", "金额"])
     sheet.append(["BX-001", "张伟", 3200])
     sheet.append(["BX-002", "李娜", 8600])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    record = save_upload(session, workspace, "明细.xlsx", buffer.getvalue())
-    index_file(session, workspace.id, record)
+    excel_path = tmp_path / "明细.xlsx"
+    book.save(excel_path)
 
     document = Document()
     document.add_heading("报销制度", level=1)
     document.add_paragraph("第二条 单笔报销金额不得超过 5000 元。")
-    buffer = io.BytesIO()
-    document.save(buffer)
-    record = save_upload(session, workspace, "制度.docx", buffer.getvalue())
-    index_file(session, workspace.id, record)
+    word_path = tmp_path / "制度.docx"
+    document.save(str(word_path))
 
-    session.flush()
-    return workspace
-
-
-def _child_ids(session, workspace_id: str) -> list[str]:
-    from sqlalchemy import select
-
-    from app.models import Chunk
-
-    return list(
-        session.scalars(
-            select(Chunk.id).where(
-                Chunk.workspace_id == workspace_id, Chunk.level == "child"
+    records: list[ChunkRecord] = []
+    for path, rel_path in ((excel_path, "明细.xlsx"), (word_path, "制度.docx")):
+        file_id = FILE_IDS[rel_path]
+        for group_index, group in enumerate(chunk_document_groups(path, rel_path)):
+            parent_id = f"{file_id}-g{group_index}"
+            parent_counts = token_counts(group.parent.text)
+            records.append(
+                ChunkRecord(
+                    id=parent_id,
+                    file_id=file_id,
+                    parent_id=None,
+                    level="parent",
+                    text=group.parent.text,
+                    location=group.parent.location,
+                    meta=group.parent.meta,
+                    token_counts=parent_counts,
+                    token_length=sum(parent_counts.values()),
+                )
             )
-        )
-    )
+            for child_index, child in enumerate(group.children):
+                child_counts = token_counts(child.text)
+                records.append(
+                    ChunkRecord(
+                        id=f"{parent_id}-c{child_index}",
+                        file_id=file_id,
+                        parent_id=parent_id,
+                        level="child",
+                        text=child.text,
+                        location=child.location,
+                        meta=child.meta,
+                        token_counts=child_counts,
+                        token_length=sum(child_counts.values()),
+                    )
+                )
+    # The corpus file map is {file_id: rel_path}, the retrieval-corpus shape.
+    files = {file_id: rel_path for rel_path, file_id in FILE_IDS.items()}
+    return files, records
+
+
+def _child_ids(corpus) -> list[str]:
+    _, records = corpus
+    return [record.id for record in records if record.level == "child"]
 
 
 # --------------------------------------------------------------------------- #
@@ -150,37 +168,33 @@ def test_fingerprint_ignores_whitespace_and_trailing_context() -> None:
 
 
 def test_dedupe_keeps_first_occurrence_and_preserves_order() -> None:
-    from app.models import Chunk
-
     chunks = {
-        "a": Chunk(id="a", workspace_id="w", file_id="f", text="同一段内容"),
-        "b": Chunk(id="b", workspace_id="w", file_id="f", text="同一段内容"),
-        "c": Chunk(id="c", workspace_id="w", file_id="f", text="另一段内容"),
+        "a": ChunkRecord(id="a", file_id="f", parent_id=None, level="child", text="同一段内容", location="l"),
+        "b": ChunkRecord(id="b", file_id="f", parent_id=None, level="child", text="同一段内容", location="l"),
+        "c": ChunkRecord(id="c", file_id="f", parent_id=None, level="child", text="另一段内容", location="l"),
     }
     deduped = Retriever._dedupe(["a", "b", "c"], chunks)
     assert deduped == ["a", "c"]
 
 
 def test_dedupe_drops_unknown_ids() -> None:
-    from app.models import Chunk
-
-    chunks = {"a": Chunk(id="a", workspace_id="w", file_id="f", text="内容")}
+    chunks = {
+        "a": ChunkRecord(id="a", file_id="f", parent_id=None, level="child", text="内容", location="l")
+    }
     assert Retriever._dedupe(["missing", "a"], chunks) == ["a"]
 
 
 # --------------------------------------------------------------------------- #
 # parent context
 # --------------------------------------------------------------------------- #
-def test_children_are_ranked_and_parents_supply_context(
-    temp_session, tmp_path, monkeypatch
-) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_children_are_ranked_and_parents_supply_context(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     assert child_ids
 
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
@@ -202,62 +216,33 @@ def test_children_are_ranked_and_parents_supply_context(
 
 
 # --------------------------------------------------------------------------- #
-# stateless corpus loader (M2: 语料经 /internal/retrieval-corpus 回读)
+# corpus loader (M2: 语料经 /internal/retrieval-corpus 回读)
 # --------------------------------------------------------------------------- #
-def test_corpus_loader_replaces_the_session(temp_session, tmp_path, monkeypatch) -> None:
-    """与 session 版同一套行为：child 排序、parent 附上下文、file map 给出路径。"""
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_corpus_loader_is_read_once_per_search(tmp_path) -> None:
+    """child 排序、parent 附上下文、file map 给出路径；一次 search 只回读一次
+    （children/parents/file map 共享同一份 memoized 结果）。"""
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
+    files, records = corpus
 
-    from sqlalchemy import select
-
-    from app.models import Chunk, DocumentFile
-
-    chunks = list(
-        temp_session.scalars(select(Chunk).where(Chunk.workspace_id == workspace.id))
-    )
-    files = {
-        row.id: row.rel_path
-        for row in temp_session.scalars(
-            select(DocumentFile).where(DocumentFile.workspace_id == workspace.id)
-        )
-    }
     loader_calls = []
 
     def loader():
-        from app.retrieval.pipeline import ChunkRecord
-
         loader_calls.append(1)
-        return files, [
-            ChunkRecord(
-                id=row.id,
-                file_id=row.file_id,
-                parent_id=row.parent_id,
-                level=row.level,
-                text=row.text,
-                location=row.location,
-                meta=row.meta or {},
-                token_counts=row.token_counts or {},
-                token_length=row.token_length,
-                ordinal=row.ordinal,
-            )
-            for row in chunks
-        ]
+        return files, records
 
     retriever = Retriever(
-        None,
-        workspace.id,
+        "ws",
+        corpus_loader=loader,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
             order=list(range(len(child_ids))), scores=[0.9] * len(child_ids)
         ),
         rewriter=FixedRewriter("张伟的报销金额"),
-        corpus_loader=loader,
     )
     hits = retriever.search("张伟报销多少", use_dense=True, use_rerank=True)
     assert hits
-    # 一次 search 只回读一次语料（children/parents/file map 共享同一结果）。
     assert len(loader_calls) == 1
 
     hit = hits[0]
@@ -266,33 +251,29 @@ def test_corpus_loader_replaces_the_session(temp_session, tmp_path, monkeypatch)
     assert hit.parent_location is not None
 
 
-def test_corpus_loader_misses_map_to_placeholder_file(temp_session, tmp_path, monkeypatch) -> None:
-    """语料里 file_id 对不上文件表时的兜底行为与 session 版一致。"""
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
-
-    from app.retrieval.pipeline import ChunkRecord
+def test_corpus_loader_misses_map_to_placeholder_file(tmp_path) -> None:
+    """语料里 file_id 对不上文件表时的兜底：引用退化为「未知文件」。"""
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
 
     def loader():
         return {}, [
             ChunkRecord(
-                id=chunk_id,
+                id=child_ids[0],
                 file_id="ghost-file",
                 parent_id=None,
                 level="child",
                 text="张伟的报销金额 3200",
                 location="报销明细!第2行",
             )
-            for chunk_id in child_ids[:1]
         ]
 
     retriever = Retriever(
-        None,
-        workspace.id,
+        "ws",
+        corpus_loader=loader,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids[:1]),
         rewriter=FixedRewriter("张伟"),
-        corpus_loader=loader,
     )
     hits = retriever.search("张伟", use_dense=True, use_rerank=False)
     assert hits and hits[0].rel_path == "未知文件"
@@ -301,16 +282,16 @@ def test_corpus_loader_misses_map_to_placeholder_file(temp_session, tmp_path, mo
 # --------------------------------------------------------------------------- #
 # relevance gate
 # --------------------------------------------------------------------------- #
-def test_low_scores_are_gated_out_entirely(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_low_scores_are_gated_out_entirely(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     from app.config import get_settings
 
     default_threshold = get_settings().rerank_score_threshold
 
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
@@ -328,12 +309,12 @@ def test_low_scores_are_gated_out_entirely(temp_session, tmp_path, monkeypatch) 
     assert retriever.last_run.threshold_applied == pytest.approx(default_threshold)
 
 
-def test_scores_above_the_floor_survive(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_scores_above_the_floor_survive(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
@@ -347,12 +328,12 @@ def test_scores_above_the_floor_survive(temp_session, tmp_path, monkeypatch) -> 
     assert hits[0].score == pytest.approx(0.92)
 
 
-def test_threshold_zero_disables_the_gate(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_threshold_zero_disables_the_gate(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
@@ -366,15 +347,13 @@ def test_threshold_zero_disables_the_gate(temp_session, tmp_path, monkeypatch) -
     assert retriever.last_run.threshold_applied is None
 
 
-def test_gate_is_skipped_when_scores_are_not_relevance(
-    temp_session, tmp_path, monkeypatch
-) -> None:
+def test_gate_is_skipped_when_scores_are_not_relevance(tmp_path) -> None:
     """A noop reranker returns fused ranks, which a relevance floor cannot filter."""
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(
@@ -393,11 +372,9 @@ def test_gate_is_skipped_when_scores_are_not_relevance(
 # --------------------------------------------------------------------------- #
 # rewriting
 # --------------------------------------------------------------------------- #
-def test_rewritten_query_is_used_for_both_legs(
-    temp_session, tmp_path, monkeypatch
-) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_rewritten_query_is_used_for_both_legs(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     store = FakeVectorStore(child_ids)
     reranker = ScriptedReranker(
         order=list(range(len(child_ids))), scores=[0.9] * len(child_ids)
@@ -405,8 +382,8 @@ def test_rewritten_query_is_used_for_both_legs(
     rewriter = FixedRewriter("报销金额上限是多少")
 
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=store,
         reranker=reranker,
@@ -420,13 +397,13 @@ def test_rewritten_query_is_used_for_both_legs(
     assert retriever.last_run.original_query == "报销咋整"
 
 
-def test_history_reaches_the_rewriter(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_history_reaches_the_rewriter(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     rewriter = FixedRewriter("第三条的内容是什么")
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=FakeVectorStore(child_ids),
         reranker=ScriptedReranker(order=[0], scores=[0.9]),
@@ -437,15 +414,15 @@ def test_history_reaches_the_rewriter(temp_session, tmp_path, monkeypatch) -> No
     assert rewriter.seen[0][1] == ["用户: 第二条怎么规定", "助手: 第二条是..."]
 
 
-def test_rewrite_is_skipped_when_disabled(temp_session, tmp_path, monkeypatch) -> None:
-    workspace = _seed(temp_session, tmp_path, monkeypatch)
-    child_ids = _child_ids(temp_session, workspace.id)
+def test_rewrite_is_skipped_when_disabled(tmp_path) -> None:
+    corpus = _corpus(tmp_path)
+    child_ids = _child_ids(corpus)
     store = FakeVectorStore(child_ids)
     rewriter = FixedRewriter("不该被用到")
 
     retriever = Retriever(
-        temp_session,
-        workspace.id,
+        "ws",
+        corpus_loader=lambda: corpus,
         embeddings=FakeEmbeddings(),
         vector_store=store,
         reranker=ScriptedReranker(order=[0], scores=[0.9]),
@@ -517,77 +494,3 @@ def test_rewriter_disabled_makes_no_model_call() -> None:
         settings.query_rewrite_enabled = original
     assert result.query == "报销咋整"
     assert llm.calls == 0
-
-
-# --------------------------------------------------------------------------- #
-# write-lock discipline
-# --------------------------------------------------------------------------- #
-def test_index_file_embeds_before_any_db_write(temp_session, tmp_path, monkeypatch) -> None:
-    """Reindexing must not hold SQLite's write lock while the model embeds.
-
-    It used to flush an ``indexing`` status row first and embed inside that
-    transaction, so a concurrent approval click queued behind the whole
-    embedding run and died with ``database is locked``. Embedding must happen
-    before the first write of the indexing burst.
-    """
-    import io as _io
-
-    from sqlalchemy import event
-
-    from app.config import get_settings
-    from app.services.files import index_file, save_upload
-
-    settings = get_settings()
-    monkeypatch.setattr(settings, "data_dir", tmp_path / "data", raising=False)
-    settings.ensure_directories()
-
-    workspace = Workspace(name="锁窗口测试")
-    temp_session.add(workspace)
-    temp_session.flush()
-
-    book = Workbook()
-    book.active.append(["产品", "单价"])
-    book.active.append(["甲", 10])
-    buffer = _io.BytesIO()
-    book.save(buffer)
-    record = save_upload(temp_session, workspace, "小表.xlsx", buffer.getvalue())
-    temp_session.flush()
-
-    state = {"writes_started": False}
-
-    def _mark_before_flush(*_args, **_kwargs) -> None:
-        state["writes_started"] = True
-
-    event.listen(temp_session, "before_flush", _mark_before_flush)
-
-    class SpyEmbeddings:
-        def embed_documents(self, texts):
-            assert not state["writes_started"], (
-                "embedding ran after the write burst began; the SQLite write "
-                "lock would be held across the model call"
-            )
-            return [[float(len(text)) % 7] * 4 for text in texts]
-
-        def embed_query(self, text):
-            return [0.0] * 4
-
-    upserts: list[int] = []
-
-    class RecordingStore:
-        def upsert_vectors(self, workspace_id, chunk_ids, vectors, payloads):
-            upserts.append(len(chunk_ids))
-            assert len(vectors) == len(chunk_ids)
-            return len(chunk_ids)
-
-    result = index_file(
-        temp_session,
-        workspace.id,
-        record,
-        embeddings=SpyEmbeddings(),
-        vector_store=RecordingStore(),
-    )
-
-    assert result.chunk_count > 0
-    assert result.vector_count == result.chunk_count
-    assert upserts == [result.chunk_count]
-    assert state["writes_started"]
