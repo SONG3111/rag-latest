@@ -6,6 +6,7 @@ import com.raglatest.backend.api.dto.Dtos.WorkspaceCreate;
 import com.raglatest.backend.api.dto.Dtos.WorkspaceRead;
 import com.raglatest.backend.internal.AiServiceClient;
 import com.raglatest.backend.service.FileStorage;
+import com.raglatest.backend.service.IndexingService;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
 import java.io.IOException;
@@ -48,13 +49,16 @@ public class WorkspaceController {
     private final WorkspaceRepository workspaces;
     private final DocumentFileRepository files;
     private final FileStorage storage;
+    private final IndexingService indexing;
     private final AiServiceClient aiService;
 
     public WorkspaceController(WorkspaceRepository workspaces, DocumentFileRepository files,
-                               FileStorage storage, AiServiceClient aiService) {
+                               FileStorage storage, IndexingService indexing,
+                               AiServiceClient aiService) {
         this.workspaces = workspaces;
         this.files = files;
         this.storage = storage;
+        this.indexing = indexing;
         this.aiService = aiService;
     }
 
@@ -107,8 +111,8 @@ public class WorkspaceController {
     }
 
     /**
-     * M1 阶段：落盘并登记为 pending；索引（chunk+向量）在 M3 接 ai-service
-     * 的 /v1/index 后由这里补调用。响应形状已按 IndexingResponse 对齐。
+     * 上传即建索引：落盘登记后立即经 ai-service 的 /v1/index 解析、嵌入并落库分块。
+     * 索引失败不影响上传本身（文件已保存，状态为 failed，可经 reindex 重试）。
      */
     @PostMapping("/workspaces/{workspaceId}/files")
     public ResponseEntity<List<IndexingResponse>> uploadFiles(
@@ -132,10 +136,28 @@ public class WorkspaceController {
             FileRead record = files.insertPending(
                     workspaceId, stored.relPath(), stored.kind(),
                     stored.sizeBytes(), stored.checksum());
-            results.add(new IndexingResponse(
-                    record.id(), record.relPath(), 0, 0, "pending", null));
+            results.add(indexing.index(workspaceId, record.id()));
         }
         return ResponseEntity.status(HttpStatus.CREATED).body(results);
+    }
+
+    /** 重建单个文件的索引（分块策略或模型变更后使用）。 */
+    @PostMapping("/workspaces/{workspaceId}/files/{fileId}/reindex")
+    public IndexingResponse reindexFile(@PathVariable String workspaceId,
+                                        @PathVariable String fileId) {
+        requireWorkspace(workspaceId);
+        return indexing.index(workspaceId, fileId);
+    }
+
+    /** 重建整个工作区的索引：分块/嵌入变更后，从源文件重建（派生数据不就地修补）。 */
+    @PostMapping("/workspaces/{workspaceId}/reindex")
+    public List<IndexingResponse> reindexWorkspace(@PathVariable String workspaceId) {
+        requireWorkspace(workspaceId);
+        List<IndexingResponse> results = new ArrayList<>();
+        for (FileRead file : files.listByWorkspace(workspaceId)) {
+            results.add(indexing.index(workspaceId, file.id()));
+        }
+        return results;
     }
 
     @DeleteMapping("/workspaces/{workspaceId}/files/{fileId}")

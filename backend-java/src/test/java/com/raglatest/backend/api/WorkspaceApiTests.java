@@ -14,6 +14,7 @@ import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -100,6 +101,16 @@ class WorkspaceApiTests {
         rest = template;
     }
 
+    /** 上传/重建索引现在都会调用 ai-service 的 /v1/index；默认桩为空分块。 */
+    @BeforeEach
+    void stubIndexing() {
+        aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
+                        "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
+                        + "\"error\":null,\"checksum\":\"deadbeef\",\"chunks\":[]}")));
+    }
+
     private static final byte[] XLSX_BYTES = "not-really-xlsx-but-nonempty".getBytes();
 
     // ------------------------------------------------------------------ //
@@ -119,6 +130,13 @@ class WorkspaceApiTests {
     @Test
     void unknownWorkspaceIs404() {
         assertThat(rest.getForEntity("/api/workspaces/nope", String.class)
+                .getStatusCode().value()).isEqualTo(404);
+    }
+
+    @Test
+    void unknownRouteIs404Not500() {
+        // 未映射路径不得被兜底 Exception 处理器吞成 500。
+        assertThat(rest.getForEntity("/api/definitely-not-a-route", String.class)
                 .getStatusCode().value()).isEqualTo(404);
     }
 
@@ -145,12 +163,12 @@ class WorkspaceApiTests {
     // files
     // ------------------------------------------------------------------ //
     @Test
-    void uploadStoresFileAsPendingAndDownloadRoundTrips() {
+    void uploadStoresAndIndexesFileAndDownloadRoundTrips() {
         String ws = createWorkspace("文件");
         ResponseEntity<String> upload = upload(ws, "销售表.xlsx", XLSX_BYTES);
         assertThat(upload.getStatusCode().value()).isEqualTo(201);
         assertThat(jsonPath(upload, "$[0].rel_path")).isEqualTo("销售表.xlsx");
-        assertThat(jsonPath(upload, "$[0].status")).isEqualTo("pending");
+        assertThat(jsonPath(upload, "$[0].status")).isEqualTo("indexed");
         assertThat(jsonPath(upload, "$[0].chunk_count").toString()).isEqualTo("0");
 
         ResponseEntity<String> list = rest.getForEntity(
@@ -199,6 +217,39 @@ class WorkspaceApiTests {
         aiService.verify(com.github.tomakehurst.wiremock.client.WireMock
                 .deleteRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
                         .urlPathEqualTo("/v1/collections/" + ws + "/vectors")));
+    }
+
+    @Test
+    void reindexPersistsChunksReturnedByAiService() {
+        String ws = createWorkspace("重建索引");
+        ResponseEntity<String> upload = upload(ws, "a.xlsx", XLSX_BYTES);
+        String fileId = jsonPath(upload, "$[0].file_id").toString();
+
+        // 用带分块行的应答覆盖默认桩：验证 Java 把 /v1/index 返回的行原样落库。
+        aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson("""
+                        {"status":"indexed","chunk_count":1,"vector_count":1,"error":null,
+                         "checksum":"abc","chunks":[
+                          {"id":"p1","parent_id":null,"level":"parent","ordinal":0,
+                           "text":"表头","location":"销售!第1行","meta":{},"token_counts":{},"token_length":2},
+                          {"id":"c1","parent_id":"p1","level":"child","ordinal":1,
+                           "text":"A型,1000","location":"销售!第2行","meta":{"kind":"excel"},
+                           "token_counts":{"total":4},"token_length":4}]}
+                        """)));
+
+        ResponseEntity<String> reindex = rest.postForEntity(
+                "/api/workspaces/{ws}/files/{id}/reindex", null, String.class, ws, fileId);
+        assertThat(reindex.getStatusCode().value()).isEqualTo(200);
+        assertThat(jsonPath(reindex, "$.status")).isEqualTo("indexed");
+        assertThat(jsonPath(reindex, "$.chunk_count").toString()).isEqualTo("1");
+
+        ResponseEntity<String> corpus = rest.getForEntity(
+                "/internal/workspaces/{ws}/retrieval-corpus", String.class, ws);
+        com.jayway.jsonpath.DocumentContext corpusBody =
+                com.jayway.jsonpath.JsonPath.parse(corpus.getBody());
+        assertThat(corpusBody.read("$.chunks.length()", Integer.class)).isEqualTo(2);
+        assertThat(corpusBody.read("$.chunks[1].parent_id", String.class)).isEqualTo("p1");
     }
 
     // ------------------------------------------------------------------ //

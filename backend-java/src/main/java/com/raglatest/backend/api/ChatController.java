@@ -240,11 +240,11 @@ public class ChatController {
         JsonNode diff = payload.get("diff");
         String operationId = operations.insertProposed(
                 state.workspaceId,
-                payload.path("tool").asText(""),
-                payload.path("path").asText(""),
+                payload.path("tool").asString(""),
+                payload.path("path").asString(""),
                 arguments != null ? arguments : mapper.createObjectNode(),
                 diff != null ? diff : mapper.createArrayNode(),
-                payload.path("summary").asText(""));
+                payload.path("summary").asString(""));
         payload.put("operation_id", operationId);
         state.addProposal(operationId);
 
@@ -261,7 +261,7 @@ public class ChatController {
     /** persist：权威落库（assistant 行 + trace + 摘要书签）后合成对外 done。 */
     private void handlePersist(String data, SseEmitter emitter, ChatTurnState state) {
         JsonNode persist = mapper.readTree(data);
-        String content = persist.path("content").asText("");
+        String content = persist.path("content").asString("");
         JsonNode citations = persist.get("citations");
         ArrayNode toolCalls = state.buildToolCalls(mapper);
 
@@ -273,17 +273,17 @@ public class ChatController {
             for (JsonNode node : persist.path("trace_nodes")) {
                 JsonNode error = node.get("error");
                 traces.insertNode(state.workspaceId, state.runId, new TraceNodeInput(
-                        node.path("node").asText(),
+                        node.path("node").asString(),
                         node.path("duration_ms").asLong(0),
                         node.get("input"),
                         node.get("output"),
-                        error == null || error.isNull() ? null : error.asText()));
+                        error == null || error.isNull() ? null : error.asString()));
             }
             JsonNode summary = persist.get("summary");
             if (summary != null && !summary.isNull()) {
                 summaries.upsert(
                         state.workspaceId,
-                        summary.path("text").asText(),
+                        summary.path("text").asString(),
                         summary.path("covered_count").asInt(0));
             }
             return id;
@@ -407,7 +407,7 @@ public class ChatController {
         }
 
         private static String tokenText(String data, ObjectMapper mapper) {
-            return mapper.readTree(data).path("text").asText("");
+            return mapper.readTree(data).path("text").asString("");
         }
 
         synchronized void addProposal(String operationId) {

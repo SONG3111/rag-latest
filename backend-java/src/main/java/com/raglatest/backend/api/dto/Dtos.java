@@ -66,4 +66,13 @@ public final class Dtos {
 
     /** 会话滚动摘要（messages 表书签算术的另一半）。 */
     public record SummaryRow(String summary, int coveredCount) {}
+
+    /**
+     * 审批操作对外响应，字段形状对齐 python schemas.OperationRead（不含 arguments；
+     * full 参数只出现在 SSE proposal 帧里）。diff 缺失时序列化为空数组。
+     */
+    public record OperationRead(
+            String id, String toolName, String relPath, String summary, String status,
+            JsonNode diff, JsonNode result, String error, String backupPath,
+            Instant createdAt, Instant resolvedAt) {}
 }

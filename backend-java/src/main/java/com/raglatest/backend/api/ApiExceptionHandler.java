@@ -10,6 +10,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
@@ -66,6 +67,15 @@ public class ApiExceptionHandler {
                 .body(detail("当前对话请求过多，请稍后重试"));
     }
 
+    /**
+     * 未匹配到任何路由/静态资源：返回 404，而不是被下方兜底 Exception 处理器
+     * 吞成 500（形状与原 Python/FastAPI 的未知路径一致）。
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ObjectNode> noResource(NoResourceFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(detail("not found"));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ObjectNode> unexpected(Exception ex) {
         log.error("unhandled error", ex);
@@ -82,7 +92,7 @@ public class ApiExceptionHandler {
     /** ai-service 错误体的 detail 提取辅助。 */
     public static String extractDetail(JsonNode errorBody, String fallback) {
         if (errorBody != null && errorBody.hasNonNull("detail")) {
-            return errorBody.get("detail").asText();
+            return errorBody.get("detail").asString();
         }
         return fallback;
     }

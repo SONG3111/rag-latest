@@ -1,6 +1,13 @@
 package com.raglatest.backend.db;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoField;
 import java.util.List;
+import java.util.Map;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -154,6 +161,28 @@ public class DbInitializer implements ApplicationRunner {
             // 点赞/点踩；NULL 让旧消息行保持合法。
             new AdditiveColumn("messages", "feedback", "VARCHAR(10)", null));
 
+    /** 需要归一化的时间戳列（旧 Python 版写成文本，Java 版写成整数）。 */
+    private record TimestampColumn(String table, String column) {}
+
+    private static final List<TimestampColumn> TIMESTAMP_COLUMNS = List.of(
+            new TimestampColumn("workspaces", "created_at"),
+            new TimestampColumn("workspaces", "updated_at"),
+            new TimestampColumn("document_files", "created_at"),
+            new TimestampColumn("document_files", "indexed_at"),
+            new TimestampColumn("messages", "created_at"),
+            new TimestampColumn("conversation_summaries", "updated_at"),
+            new TimestampColumn("run_traces", "created_at"),
+            new TimestampColumn("operations", "created_at"),
+            new TimestampColumn("operations", "resolved_at"));
+
+    /** Python/SQLAlchemy 的写法：'YYYY-MM-DD HH:MM:SS[.ffffff]'（UTC，无时区后缀）。 */
+    private static final DateTimeFormatter LEGACY_TIMESTAMP = new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd HH:mm:ss")
+            .optionalStart()
+            .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
+            .optionalEnd()
+            .toFormatter();
+
     private final JdbcTemplate jdbc;
 
     public DbInitializer(DataSource dataSource) {
@@ -170,6 +199,7 @@ public class DbInitializer implements ApplicationRunner {
         for (String ddl : INDEXES) {
             jdbc.execute(ddl);
         }
+        normalizeLegacyTimestamps();
     }
 
     private void applyAdditiveMigrations() {
@@ -184,6 +214,44 @@ public class DbInitializer implements ApplicationRunner {
             }
             jdbc.execute(clause);
             log.info("migration: added column {}.{}", migration.table(), migration.column());
+        }
+    }
+
+    /**
+     * 把旧库里的**文本**时间戳归一为 Java 侧使用的整数 epoch-ms。
+     *
+     * <p>原因：Python 版经 SQLAlchemy 把时间写成 'YYYY-MM-DD HH:MM:SS.ffffff'（UTC）文本，
+     * 而 Java 侧经 sqlite-jdbc 存/读的是整数毫秒。同一列混用两种类型时，SQLite 会按**类型**
+     * 而非时间排序（NULL &lt; INTEGER &lt; TEXT），导致 {@code ORDER BY created_at} 取不到最新、
+     * {@code MAX(created_at)} 算错；且 sqlite-jdbc 解析 6 位小数文本会得到错误的时刻。</p>
+     *
+     * <p>以 {@code typeof(col) = 'text'} 为守卫：转换后不再命中，因此每次启动可安全重复执行
+     * （等价于一次性的数据归一，不做其它数据改动）。</p>
+     */
+    private void normalizeLegacyTimestamps() {
+        for (TimestampColumn column : TIMESTAMP_COLUMNS) {
+            if (!tableExists(column.table()) || !columnExists(column.table(), column.column())) {
+                continue;
+            }
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT rowid AS rid, " + column.column() + " AS ts FROM " + column.table()
+                            + " WHERE typeof(" + column.column() + ") = 'text'");
+            for (Map<String, Object> row : rows) {
+                Object raw = row.get("ts");
+                if (!(raw instanceof String text) || text.isBlank()) {
+                    continue;
+                }
+                try {
+                    long millis = LocalDateTime.parse(text.trim(), LEGACY_TIMESTAMP)
+                            .toInstant(ZoneOffset.UTC)
+                            .toEpochMilli();
+                    jdbc.update("UPDATE " + column.table() + " SET " + column.column()
+                            + " = ? WHERE rowid = ?", millis, row.get("rid"));
+                } catch (DateTimeParseException ex) {
+                    log.warn("skip unparseable legacy timestamp {}.{} (rowid={}): {}",
+                            column.table(), column.column(), row.get("rid"), raw);
+                }
+            }
         }
     }
 

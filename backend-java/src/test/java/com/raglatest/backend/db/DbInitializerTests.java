@@ -98,6 +98,34 @@ class DbInitializerTests {
                 "conversation_summaries", "run_traces", "operations", "mcp_tools");
     }
 
+    @Test
+    void normalizesLegacyTextTimestampsToEpochMillis() {
+        legacy.execute("""
+                CREATE TABLE messages (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    workspace_id VARCHAR(32) NOT NULL,
+                    role VARCHAR(9) NOT NULL,
+                    content TEXT,
+                    created_at DATETIME
+                )
+                """);
+        legacy.update(
+                "INSERT INTO messages (id, workspace_id, role, created_at) VALUES (?, ?, ?, ?)",
+                "m1", "w1", "user", "2026-09-12 05:54:24.022857");
+
+        new DbInitializer(new DriverManagerDataSource(LEGACY_URL)).run(null);
+
+        // 旧文本时间（UTC）→ 整数 epoch-ms，与 Java 写入类型一致，排序/MAX 才按时间生效。
+        assertThat(legacy.queryForObject(
+                "SELECT typeof(created_at) FROM messages WHERE id = ?", String.class, "m1"))
+                .isEqualTo("integer");
+        long expected = java.time.LocalDateTime.parse("2026-09-12T05:54:24.022857")
+                .toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+        assertThat(legacy.queryForObject(
+                "SELECT created_at FROM messages WHERE id = ?", Long.class, "m1"))
+                .isEqualTo(expected);
+    }
+
     private static List<String> columnNames(JdbcTemplate jdbc, String table) {
         return jdbc.queryForList("PRAGMA table_info(" + table + ")").stream()
                 .map(column -> String.valueOf(column.get("name")))

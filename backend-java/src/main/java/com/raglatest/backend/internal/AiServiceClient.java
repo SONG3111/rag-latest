@@ -52,11 +52,14 @@ public class AiServiceClient {
 
     private final WebClient webClient;
     private final Duration requestTimeout;
+    /** 重活（索引/嵌入）的墙钟预算：本地嵌入可能耗时数十秒，沿用整轮对话预算。 */
+    private final Duration longOperationTimeout;
     private final CircuitBreaker readsCircuitBreaker;
     private final CircuitBreaker chatCircuitBreaker;
 
     public AiServiceClient(RagProperties properties, CircuitBreakerRegistry circuitBreakers) {
         this.requestTimeout = properties.aiService().requestTimeout();
+        this.longOperationTimeout = properties.aiService().chatTurnTimeout();
         HttpClient httpClient = HttpClient.create().noProxy();
         this.webClient = WebClient.builder()
                 .baseUrl(properties.aiService().baseUrl())
@@ -107,6 +110,48 @@ public class AiServiceClient {
                 .queryParam("file", file)
                 .queryParam("location", location)
                 .build(workspaceId))).get();
+    }
+
+    // ------------------------------------------------------------------ //
+    // 索引：分块 + 嵌入 + 向量 upsert（不写库，分块行由本侧落库）
+    // ------------------------------------------------------------------ //
+    /**
+     * 请求 ai-service 解析文件、嵌入子块并写入稠密索引，返回分块行（含 id）交本侧持久化。
+     * 不走熔断：索引是显式触发的重活，失败应直接反馈给调用方而非被快速拒绝。
+     */
+    public JsonNode indexFile(String workspaceId, String fileId, String relPath) {
+        java.util.Map<String, String> body = new java.util.LinkedHashMap<>();
+        body.put("workspace_id", workspaceId);
+        body.put("file_id", fileId);
+        body.put("rel_path", relPath);
+        return post("/v1/index", body);
+    }
+
+    /** 按名执行一个 MCP 工具并返回其 {"ok": ...} 信封（审批通过后由业务层调用写工具）。 */
+    public JsonNode callTool(String tool, JsonNode arguments) {
+        java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("tool", tool);
+        body.put("arguments", arguments);
+        return post("/v1/tools/call", body);
+    }
+
+    private JsonNode post(String path, Object body) {
+        try {
+            return webClient.post()
+                    .uri(path)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(body)
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block(longOperationTimeout);
+        } catch (WebClientResponseException ex) {
+            throw translateUpstreamStatus(ex);
+        } catch (WebClientRequestException | IllegalStateException ex) {
+            if (isTransient(ex)) {
+                throw new TransientAiServiceException("ai-service unreachable: " + ex.getMessage());
+            }
+            throw ex;
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -229,7 +274,7 @@ public class AiServiceClient {
         try {
             JsonNode body = ex.getResponseBodyAs(JsonNode.class);
             if (body != null && body.hasNonNull("detail")) {
-                return body.get("detail").asText();
+                return body.get("detail").asString();
             }
         } catch (Exception ignored) {
             // 非 JSON 错误体，退回状态文本

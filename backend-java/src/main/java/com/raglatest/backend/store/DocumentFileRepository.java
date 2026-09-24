@@ -37,6 +37,15 @@ public class DocumentFileRepository {
                 .optional();
     }
 
+    /** 按相对路径找文件：审批写入/还原后的后台重建索引用它定位已登记的文件。 */
+    public Optional<FileRead> findByRelPath(String workspaceId, String relPath) {
+        return jdbc.sql(SELECT + " WHERE workspace_id = :ws AND rel_path = :relPath")
+                .param("ws", workspaceId)
+                .param("relPath", relPath)
+                .query(this::mapRow)
+                .optional();
+    }
+
     public FileRead insertPending(String workspaceId, String relPath, String kind,
                                   long sizeBytes, String checksum) {
         String id = WorkspaceRepository.newId();
@@ -62,6 +71,29 @@ public class DocumentFileRepository {
     /** chunks 行经 document_files 的 ON DELETE CASCADE 一并清掉。 */
     public void delete(String fileId) {
         jdbc.sql("DELETE FROM document_files WHERE id = :id").param("id", fileId).update();
+    }
+
+    /** 索引成功：写入分块数、文件指纹与完成时间，清空错误。 */
+    public void markIndexed(String fileId, int chunkCount, String checksum) {
+        jdbc.sql("""
+                        UPDATE document_files
+                        SET status = 'indexed', chunk_count = :count, checksum = :checksum,
+                            error = NULL, indexed_at = :at
+                        WHERE id = :id
+                        """)
+                .param("count", chunkCount)
+                .param("checksum", checksum == null ? "" : checksum)
+                .param("at", Timestamp.from(java.time.Instant.now()))
+                .param("id", fileId)
+                .update();
+    }
+
+    /** 索引失败：记录状态与可读原因，保留文件以便重试。 */
+    public void markFailed(String fileId, String error) {
+        jdbc.sql("UPDATE document_files SET status = 'failed', error = :error WHERE id = :id")
+                .param("error", error)
+                .param("id", fileId)
+                .update();
     }
 
     private FileRead mapRow(java.sql.ResultSet rs, int i) throws java.sql.SQLException {

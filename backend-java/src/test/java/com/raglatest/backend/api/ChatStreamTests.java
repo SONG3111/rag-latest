@@ -226,7 +226,7 @@ class ChatStreamTests {
         assertThat(rows.get(0).id()).isEqualTo(forwardedOperationId);
         assertThat(rows.get(0).status()).isEqualTo("proposed");
         assertThat(rows.get(0).toolName()).isEqualTo("update_cells");
-        assertThat(rows.get(0).arguments().path("updates").get(0).path("cell").asText())
+        assertThat(rows.get(0).arguments().path("updates").get(0).path("cell").asString())
                 .isEqualTo("B2");
         assertThat(rows.get(0).arguments().has("expected_digest")).isFalse();
 
@@ -237,9 +237,9 @@ class ChatStreamTests {
         assertThat(assistant.role()).isEqualTo("assistant");
         assertThat(assistant.id()).isEqualTo(assistantId);
         var toolCall = assistant.toolCalls().get(0);
-        assertThat(toolCall.path("operation_id").asText()).isEqualTo(forwardedOperationId);
+        assertThat(toolCall.path("operation_id").asString()).isEqualTo(forwardedOperationId);
         assertThat(toolCall.has("arguments")).isFalse();
-        assertThat(assistant.citations().get(0).path("file").asText()).isEqualTo("销售表.xlsx");
+        assertThat(assistant.citations().get(0).path("file").asString()).isEqualTo("销售表.xlsx");
 
         // trace 节点与摘要书签随 persist 落库。
         assertThat(traces.runDetail(ws, done.read("$.run_id", String.class)).orElseThrow())

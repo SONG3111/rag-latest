@@ -11,8 +11,8 @@
 |---|---|---|
 | M0 骨架并行（分支/改名/Java 骨架/三服务 compose） | ✅ 完成 | `105e121`（纯改名）、`46315e3` |
 | M1 数据层 + CRUD + 内部 /v1 接缝 | ✅ 完成 | `078d7ee` |
-| M2 聊天链路（无状态化 + SSE 中继） | ✅ 完成（未提交，待用户确认提交） | — |
-| M3 审批全链路 + 索引编排 | ⬜ 未开始 | — |
+| M2 聊天链路（无状态化 + SSE 中继） | ✅ 完成 | `cd5720e` |
+| M3 审批全链路 + 索引编排 | ✅ 完成（未提交，待用户确认提交） | — |
 | M4 退役旧代码 + 文档 | ⬜ 未开始 | — |
 
 当前分支 `feat/java-backend`（基于 `dev`）。M2 后两侧测试状态：
@@ -196,8 +196,36 @@ M2 期间顺手修的 M0/M1 遗留问题：
 4. `WorkspaceApiTests.messagesListIsChronologicalAndHonorsLimit` 偶发：created_at 毫秒精度
    同值时排序退化到随机 id；测试插入间加 5ms 隔离（老套件自身的 flake，非语义变更）。
 
-### M3
+### M3 ✅ 已全部实现（2026-09-25，未提交）
 
+与 §四原设计的偏差：**坐标重排没有放 ai-service，而是直接用 Java 实现**
+（用户后续指示“后端功能全部用 Java 实现”）；`/v1/operations/rebase-plan` 端点不再需要，
+`_rebase_arguments` 的算术作为纯函数落到 Java。已落地清单：
+
+| 侧 | 文件 | 内容 |
+|---|---|---|
+| ai-service | `app/api/internal.py` | `POST /v1/index`（分块+嵌入+Qdrant upsert，回传 chunk 行；不写库，锁纪律与旧 index_file 一致） |
+| backend-java | `service/FormulaShift.java`（新） | 公式引用平移（mcp-office-server formula_shift.py 逐行移植，含 sheet 限定/绝对引用/字符串字面量守卫） |
+| backend-java | `service/OperationRebase.java`（新） | `_rebase_arguments` 移植：行/列带算术、update_cells/set_formula/format_range/delete_range/copy_range、目标消失→null |
+| backend-java | `service/OperationSummaries.java`（新） | `summarize_operation` 逐字移植（rebase 后摘要同步改写） |
+| backend-java | `service/IndexingService.java`（新） | /v1/index 编排：嵌入在写锁外，拿行后一次事务落 chunk + 文件状态 |
+| backend-java | `service/BackupService.java`（新） | backup/restore/prune（services/backup.py 移植） |
+| backend-java | `service/OperationService.java`（新） | apply（备份→callTool→rebase→链式 digest→prune→后台 reindex）/reject/revert（+后台 reindex）；diff 重读走 read_range |
+| backend-java | `api/OperationsController.java`（新） | 列表（status 与 python 版 status_filter 双参数）、apply/reject/revert；响应 OperationRead 对齐 python schemas（含 created_at/resolved_at，不含 arguments） |
+| backend-java | `store/OperationRepository` | find/listPending/markApplied/markFailed/markRejected/updateArguments + created_at/resolved_at |
+| backend-java | `store/ChunkRepository` | replaceFileChunks（删旧+插新，id 由 ai-service 生成） |
+| backend-java | `store/DocumentFileRepository` | markIndexed/markFailed/findByRelPath（写后重建索引用） |
+| backend-java | `api/WorkspaceController` | 上传即索引 + 文件/工作区 reindex 端点 |
+| backend-java | `api/SystemController`（新） | GET /api/system/resilience（熔断/隔离状态） |
+
+**测试：** backend-java 83 用例全绿（新增 FormulaShiftTests 17、OperationRebaseTests 16
+〔均逐条移植 test_formula_shift.py / test_proposal_rebase.py 的算术用例〕、
+OperationsApiTests +5：删除重排〔含 diff 重读 B4/before=40〕、目标行已删自动驳回、
+多表隔离、apply+revert 触发后台 /v1/index、status_filter 与响应契约）；
+ai-service 216、mcp-office-server 170 全绿。顺手修复：Boot 4 EnvironmentPostProcessor
+废弃迁移（spring.factories key 同步）、前端 tsconfig baseUrl 废弃、Jackson 3 asString。
+
+### M3 原设计（保留备查）
 - ai-service：`POST /v1/operations/rebase-plan`（移植 `_plan_rebase`/`_refresh_chained_digests`/
   `_rebase_arguments` 等，输入=待重排提案 JSON+已应用操作，输出=新参数/不可重排清单；
   `test_proposal_rebase.py` 核心用例随迁）与 `POST /v1/index`（chunk+embed+Qdrant upsert，
@@ -257,8 +285,8 @@ M2 期间顺手修的 M0/M1 遗留问题：
 
 ## 六、当前未提交的工作区状态
 
-M2 全部代码已写完并双套件全绿（backend-java 25 / ai-service 217 / mcp 169+1 跳过），
-**尚未提交**（用户规则：git 操作需先确认）。改动范围：§四 M2 清单所列 ai-service 5 个
-源文件 + 2 个测试文件、backend-java 10 个新文件 + 3 个改动 + 1 个测试、
-`scripts/run_all_tests.py`、`WorkspaceApiTests`（flake 修复）、`MIGRATION-PROGRESS.md`。
-提交后把 §一 M2 行的提交号补上。
+M2 已提交（`cd5720e` + `6473d86`）。当前未提交改动 = M3 全部代码（见 §四 M3 清单）
++ 韧性容错层（ResilienceConfig/AiServiceClient 重试与熔断/SystemController）
++ 零散修复（EnvironmentPostProcessor 废弃迁移、tsconfig baseUrl、created_at 归一化、
+404 语义）。三套件回归全绿：backend-java 83 / ai-service 216 / mcp-office-server 170。
+提交后把 §一 M3 行的提交号补上。
