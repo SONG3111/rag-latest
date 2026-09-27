@@ -254,6 +254,37 @@ def _summarize_tool_call(name: str, args: dict[str, Any]) -> str:
     return f"正在调用 {name}"
 
 
+def _column_letter(index: int) -> str:
+    """1-based column number to letters (A, B, ..., AA), as in chunking._column_letter."""
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _normalize_insert_values(args: dict[str, Any]) -> None:
+    """Normalize insert_rows' values into a real 2-D array, in place.
+
+    Models sometimes encode values as a JSON string ("[[...]]") instead of an
+    array. The MCP write side still works (pydantic's lax mode parses JSON
+    strings for collection types), but everything upstream of the write — the
+    synthetic diff, the summary, backend-java's rebase — sees the raw string
+    and silently does nothing, so normalize once here at proposal time.
+    Malformed input is left untouched for the MCP validation to reject with a
+    proper message.
+    """
+    values = args.get("values")
+    if not isinstance(values, str):
+        return
+    try:
+        parsed = json.loads(values)
+    except ValueError:
+        return
+    if isinstance(parsed, list):
+        args["values"] = parsed
+
+
 @dataclass
 class AgentRuntime:
     """The per-turn facts the graph needs, handed in by the stateless chat endpoint.
@@ -812,6 +843,9 @@ class WorkspaceAgent:
         if not path or name not in _EXCEL_WRITE_TOOLS:
             return enriched
 
+        if name == "insert_rows":
+            _normalize_insert_values(enriched)
+
         digest = self._file_digest(path)
         if digest:
             enriched["expected_digest"] = digest
@@ -834,8 +868,47 @@ class WorkspaceAgent:
                 digest.update(block)
         return digest.hexdigest()
 
+    @staticmethod
+    def _synthetic_insert_diff(args: dict[str, Any]) -> list[dict]:
+        """Synthetic diff for insert_rows with values, without touching the file.
+
+        The inserted rows do not exist yet, so every ``before`` is None by
+        construction — a live read would only see the rows the insert pushes
+        down. Coordinates follow insert_rows' own fill order: values start at
+        column A of ``start_row``, one grid cell per coordinate. Formulas
+        arrive wrapped as ``{"formula": ...}`` (matching _coerce_input) and
+        are unwrapped so the card previews the actual cell content.
+        """
+        start_row = args.get("start_row")
+        values = args.get("values")
+        if not isinstance(start_row, int) or isinstance(start_row, bool) or start_row < 1:
+            return []
+        if not isinstance(values, list) or not values:
+            return []
+        diff: list[dict] = []
+        for row_offset, row in enumerate(values):
+            if not isinstance(row, (list, tuple)):
+                continue
+            for col_offset, value in enumerate(row):
+                if (
+                    isinstance(value, dict)
+                    and set(value) == {"formula"}
+                    and isinstance(value["formula"], str)
+                ):
+                    value = value["formula"]
+                diff.append(
+                    {
+                        "cell": f"{_column_letter(col_offset + 1)}{start_row + row_offset}",
+                        "before": None,
+                        "after": value,
+                    }
+                )
+        return diff
+
     async def _read_before_values(self, name: str, args: dict[str, Any]) -> list[dict]:
         """Read the cells a proposal intends to change, so the UI can show a diff."""
+        if name == "insert_rows":
+            return self._synthetic_insert_diff(args)
         if name != "update_cells":
             return []
         raw_path = args.get("path")

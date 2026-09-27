@@ -125,6 +125,8 @@ public class OperationService {
         applyRebasePlan(planRebase(workspaceId, op));
         refreshChainedDigests(workspaceId, operationId, op.relPath(), data.path("digest"));
         backups.prune(workspaceId, 50);
+        // 重建在后台要十几秒：先同步标 indexing，前端轮询期间侧栏立刻可见状态
+        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> files.markIndexing(file.id()));
         reindexAfterWrite(workspaceId, op.relPath());
         log.info("applied operation {} ({})", operationId, op.toolName());
         return operations.find(workspaceId, operationId).orElseThrow();
@@ -158,6 +160,8 @@ public class OperationService {
                     "could not restore the backup: " + ex.getMessage());
         }
         operations.markRejected(operationId, "reverted to the pre-change backup");
+        // 与 apply 同理：还原后的文件分块已过期，先标 indexing 再调度后台重建
+        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> files.markIndexing(file.id()));
         reindexAfterWrite(workspaceId, op.relPath());
         log.info("reverted operation {}", operationId);
         return operations.find(workspaceId, operationId).orElseThrow();
@@ -219,8 +223,12 @@ public class OperationService {
             if (!rebased.moved()) {
                 continue;
             }
-            JsonNode diff = other.toolName().equals("update_cells")
-                    ? refreshDiffBefore(workspaceId, other, rebased.arguments()) : null;
+            JsonNode diff = null;
+            if (other.toolName().equals("update_cells")) {
+                diff = refreshDiffBefore(workspaceId, other, rebased.arguments());
+            } else if (other.toolName().equals("insert_rows")) {
+                diff = syntheticInsertDiff(rebased.arguments());
+            }
             plan.add(new RebasePlanEntry(other, rebased.arguments(), diff));
         }
         return plan;
@@ -275,6 +283,43 @@ public class OperationService {
             }
         }
         return refreshed;
+    }
+
+    /**
+     * 重排后的 insert_rows+values 从重排后参数重建 diff：新行在提议时还不存在，
+     * before 恒为 null，坐标从 start_row 纯算术推出（values 从 A 列起按行填入），
+     * 不发任何网络读。与 ai-service 提案时的合成 diff 同一规则，公式包装
+     * {"formula": ...} 解包成公式文本展示。无 values 时返回 null（沿用原 diff）。
+     */
+    private JsonNode syntheticInsertDiff(ObjectNode args) {
+        JsonNode values = args.get("values");
+        Integer startRow = OperationRebase.parseIntArg(args.get("start_row"));
+        if (values == null || !values.isArray() || values.isEmpty()
+                || startRow == null || startRow < 1) {
+            return null;
+        }
+        ArrayNode diff = mapper.createArrayNode();
+        for (int rowOffset = 0; rowOffset < values.size(); rowOffset++) {
+            JsonNode row = values.get(rowOffset);
+            if (row == null || !row.isArray()) {
+                continue;
+            }
+            for (int colOffset = 0; colOffset < row.size(); colOffset++) {
+                JsonNode value = row.get(colOffset);
+                ObjectNode entry = diff.addObject();
+                entry.put("cell", FormulaShift.columnLetter(colOffset + 1) + (startRow + rowOffset));
+                entry.putNull("before");
+                if (value != null && value.isObject() && value.size() == 1
+                        && value.hasNonNull("formula") && value.get("formula").isString()) {
+                    entry.put("after", value.get("formula").asString());
+                } else if (value == null || value.isNull()) {
+                    entry.putNull("after");
+                } else {
+                    entry.set("after", value);
+                }
+            }
+        }
+        return diff;
     }
 
     /** 落地重排计划：只写属性，无网络、无查询。 */

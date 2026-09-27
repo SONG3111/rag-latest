@@ -36,8 +36,13 @@ async function openPreview(citation: Citation) {
 
 // 失败的提案也留在待确认面板：失败多为瞬时原因（文件被占用、校验冲突），
 // 排除后用户可以直接点「重试」。
+// 服务端按 created_at 正序返回；流式期间新提案是前插进列表的，所以这里统一
+// 再按 created_at 升序排一次，保证卡片顺序与提案提交顺序一致。
 const pending = computed(() =>
-  store.operations.filter((item) => item.status === 'proposed' || item.status === 'failed'),
+  store.operations
+    .filter((item) => item.status === 'proposed' || item.status === 'failed')
+    .slice()
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)),
 )
 const history = computed(() =>
   store.operations.filter((item) => item.status !== 'proposed' && item.status !== 'failed'),

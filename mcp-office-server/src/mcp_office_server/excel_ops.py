@@ -608,14 +608,43 @@ def insert_rows(
     start_row: int,
     count: int = 1,
     *,
+    values: list[list] | None = None,
     expected_digest: str | None = None,
 ) -> dict:
+    """Insert ``count`` empty rows before ``start_row``, optionally filling them.
+
+    ``values`` (optional) is a 2-D array written into the new rows starting at
+    column A; at most ``count`` rows may be supplied and trailing short rows are
+    allowed. Passing the row data here keeps "insert rows into the middle of a
+    table and fill them" a single atomic write — one approval card, one digest
+    window — instead of an insert proposal plus a separate update proposal whose
+    coordinates can only refer to a layout that does not exist yet. This
+    composition has no direct upstream equivalent (openpyxl's ``insert_rows``
+    only shifts; haris-musa/excel-mcp-server only overwrites ranges), so it is a
+    project-specific extension in the spirit of Excel's own "insert filled rows".
+    """
     if start_row < 1:
         raise RangeError("start_row is 1-based and must be >= 1")
     if count < 1:
         raise RangeError("count must be >= 1")
     if start_row > EXCEL_MAX_ROW:
         raise RangeError(f"start_row {start_row} is beyond Excel's last row ({EXCEL_MAX_ROW})")
+
+    # Coerce up front so a bad value fails the whole write before anything is
+    # computed, mirroring update_cells' per-cell semantics ("" clears, formulas
+    # unwrap from {"formula": ...}).
+    coerced: list[list] | None = None
+    if values is not None:
+        if not isinstance(values, list) or any(
+            not isinstance(row, (list, tuple)) for row in values
+        ):
+            raise InvalidValue("values must be a 2-D array: a list of rows, each row a list of cell values")
+        if len(values) > count:
+            raise RangeError(
+                f"values has {len(values)} rows but only {count} row(s) are inserted; "
+                "insert more rows or pass fewer value rows"
+            )
+        coerced = [[_coerce_input(cell) for cell in row] for row in values]
 
     _check_conflict(path, expected_digest)
     workbook = open_workbook(path)
@@ -640,6 +669,14 @@ def insert_rows(
         merged = merge_shift.shift_merged_ranges(
             sheet, op="insert", start=start_row, count=count, axis="row",
         )
+        cells_written = 0
+        if coerced:
+            for row_offset, row_values in enumerate(coerced):
+                for column_index, cell_value in enumerate(row_values, start=1):
+                    if cell_value is None:
+                        continue
+                    sheet.cell(row=start_row + row_offset, column=column_index).value = cell_value
+                    cells_written += 1
         save_workbook(workbook, path)
         return {
             "kind": "excel",
@@ -651,6 +688,8 @@ def insert_rows(
             "rows_after": sheet.max_row or 0,
             "merged_shifted": merged["shifted"],
             "merged_removed": merged["removed"],
+            "values_rows": len(coerced) if coerced else 0,
+            "values_cells": cells_written,
             "digest": file_digest(path),
         }
     finally:

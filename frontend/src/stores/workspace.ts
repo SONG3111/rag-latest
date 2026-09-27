@@ -14,6 +14,11 @@ import type {
 let turnCounter = 0
 const nextId = (prefix: string) => `${prefix}-${Date.now()}-${(turnCounter += 1)}`
 
+// 审批写入/还原后的 indexing 轮询：句柄是纯计时器、不是 UI 状态，放模块级。
+const INDEXING_POLL_INTERVAL_MS = 2_000
+const INDEXING_POLL_LIMIT_MS = 30_000
+let indexingPollTimer: ReturnType<typeof setTimeout> | null = null
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
     workspaces: [] as Workspace[],
@@ -112,6 +117,33 @@ export const useWorkspaceStore = defineStore('workspace', {
       } finally {
         this.loadingFiles = false
       }
+    },
+
+    /**
+     * 审批写入/还原会让受影响文件进入 indexing（后端异步重建索引，约十几秒）：
+     * 之后每 2 秒刷新一次文件列表，直到没有 indexing 文件或约 30 秒上限。
+     * 只在发起时的工作区里轮询，切换工作区即停，避免刷错列表。
+     */
+    pollIndexingFiles() {
+      const workspaceId = this.activeWorkspaceId
+      if (!workspaceId) return
+      if (indexingPollTimer !== null) clearTimeout(indexingPollTimer)
+      let elapsed = 0
+      const tick = async () => {
+        if (this.activeWorkspaceId !== workspaceId) {
+          indexingPollTimer = null
+          return
+        }
+        await this.loadFiles()
+        const stillIndexing = this.files.some((file) => file.status === 'indexing')
+        if (!stillIndexing || elapsed >= INDEXING_POLL_LIMIT_MS) {
+          indexingPollTimer = null
+          return
+        }
+        elapsed += INDEXING_POLL_INTERVAL_MS
+        indexingPollTimer = setTimeout(tick, INDEXING_POLL_INTERVAL_MS)
+      }
+      indexingPollTimer = setTimeout(tick, INDEXING_POLL_INTERVAL_MS)
     },
 
     async loadTools() {
@@ -328,6 +360,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         // 失败也要刷新：提案会进入"失败"状态留在待确认面板供重试，
         // 卡片不能停留在旧的"待确认"视图上误导用户反复点击。
         await Promise.all([this.loadOperations(), this.loadFiles()])
+        this.pollIndexingFiles()
       }
     },
 
@@ -341,6 +374,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (!this.activeWorkspaceId) return
       await api.revertOperation(this.activeWorkspaceId, operationId)
       await Promise.all([this.loadOperations(), this.loadFiles()])
+      this.pollIndexingFiles()
     },
   },
 })

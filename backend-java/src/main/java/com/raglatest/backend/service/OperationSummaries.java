@@ -40,8 +40,13 @@ public final class OperationSummaries {
                         + text(args, "cell") + " 写入公式";
             }
             case "insert_rows" -> {
-                return "在 " + relPath + " 工作表「" + text(args, "sheet_name") + "」第 "
+                String summary = "在 " + relPath + " 工作表「" + text(args, "sheet_name") + "」第 "
                         + text(args, "start_row") + " 行起插入 " + countOr(args, 1) + " 行";
+                JsonNode values = args == null ? null : args.get("values");
+                if (values != null && values.isArray() && !values.isEmpty()) {
+                    summary += "并写入 " + values.size() + " 行数据";
+                }
+                return summary;
             }
             case "delete_rows" -> {
                 return "删除 " + relPath + " 工作表「" + text(args, "sheet_name") + "」第 "

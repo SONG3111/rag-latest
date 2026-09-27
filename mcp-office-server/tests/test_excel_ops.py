@@ -238,6 +238,71 @@ def test_insert_rows_rewrites_formula_references(tmp_path: Path) -> None:
     assert reloaded["订单"]["B4"].value == "=B3*2"
 
 
+def test_insert_rows_writes_values_into_new_rows(workbook_path: Path) -> None:
+    """Atomic insert+fill: values land in the inserted rows, old rows shift down.
+
+    Pins the "insert rows into the middle of a table with data" contract — one
+    write, one digest — instead of an insert proposal followed by an update
+    proposal whose target coordinates do not exist in the current file yet.
+    """
+    result = excel_ops.insert_rows(
+        workbook_path,
+        "销售",
+        start_row=3,
+        count=1,
+        values=[["D型", "华南", "=C3*2"]],
+    )
+    assert result["values_rows"] == 1
+    assert result["values_cells"] == 3
+    reloaded = load_workbook(workbook_path)
+    sheet = reloaded["销售"]
+    assert sheet["A3"].value == "D型"
+    assert sheet["B3"].value == "华南"
+    assert sheet["C3"].value == "=C3*2"  # formula string written verbatim
+    assert sheet["A4"].value == "B型"  # old row 3 shifted down, intact
+    assert sheet["C5"].value == 3000
+
+
+def test_insert_rows_values_allow_short_rows_and_skip_none(workbook_path: Path) -> None:
+    result = excel_ops.insert_rows(
+        workbook_path,
+        "销售",
+        start_row=2,
+        count=2,
+        values=[["D型"], [None, "华北"]],
+    )
+    assert result["values_rows"] == 2
+    assert result["values_cells"] == 2  # None cells are skipped, not written
+    reloaded = load_workbook(workbook_path)
+    sheet = reloaded["销售"]
+    assert sheet["A2"].value == "D型"
+    assert sheet["B2"].value is None
+    assert sheet["A3"].value is None
+    assert sheet["B3"].value == "华北"
+    assert sheet["A4"].value == "A型"  # both inserted rows pushed old data down
+
+
+def test_insert_rows_rejects_more_value_rows_than_count(workbook_path: Path) -> None:
+    with pytest.raises(RangeError):
+        excel_ops.insert_rows(
+            workbook_path, "销售", start_row=2, count=1, values=[["X"], ["Y"]]
+        )
+    # the sheet must be untouched by the failed write
+    reloaded = load_workbook(workbook_path)
+    assert reloaded["销售"]["A2"].value == "A型"
+
+
+def test_insert_rows_rejects_non_2d_values(workbook_path: Path) -> None:
+    with pytest.raises(InvalidValue):
+        excel_ops.insert_rows(
+            workbook_path, "销售", start_row=2, count=1, values=["X", "Y"]  # type: ignore[list-item]
+        )
+    with pytest.raises(InvalidValue):
+        excel_ops.insert_rows(
+            workbook_path, "销售", start_row=2, count=1, values="X"  # type: ignore[arg-type]
+        )
+
+
 def test_delete_rows_rejects_bad_arguments(workbook_path: Path) -> None:
     with pytest.raises(RangeError):
         excel_ops.delete_rows(workbook_path, "销售", start_row=0)

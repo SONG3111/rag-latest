@@ -73,6 +73,13 @@ public class DocumentFileRepository {
         jdbc.sql("DELETE FROM document_files WHERE id = :id").param("id", fileId).update();
     }
 
+    /** 写入/还原已落盘但后台重建未跑完：先同步标 indexing，侧栏立刻可见。 */
+    public void markIndexing(String fileId) {
+        jdbc.sql("UPDATE document_files SET status = 'indexing' WHERE id = :id")
+                .param("id", fileId)
+                .update();
+    }
+
     /** 索引成功：写入分块数、文件指纹与完成时间，清空错误。 */
     public void markIndexed(String fileId, int chunkCount, String checksum) {
         jdbc.sql("""

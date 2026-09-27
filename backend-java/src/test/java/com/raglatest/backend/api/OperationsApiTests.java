@@ -307,6 +307,47 @@ class OperationsApiTests {
     }
 
     @Test
+    void applyInsertRebasesPendingInsertWithValues() throws Exception {
+        String ws = createWorkspace("插行重排");
+        writeFile(ws, "行.xlsx", "X");
+        // 先提交的插行带 values：插在第 6 行，B 列写公式（引用旧布局的第 8 行）
+        String filledInsert = seedOperation(ws, "行.xlsx", "insert_rows",
+                "{\"path\":\"行.xlsx\",\"sheet_name\":\"S\",\"start_row\":6,\"count\":1,"
+                        + "\"values\":[[\"鼠标垫\",{\"formula\":\"=B8*2\"}]]}",
+                "在 行.xlsx 工作表「S」第 6 行起插入 1 行并写入 1 行数据");
+        String blankInsert = seedOperation(ws, "行.xlsx", "insert_rows",
+                "{\"path\":\"行.xlsx\",\"sheet_name\":\"S\",\"start_row\":3,\"count\":2}",
+                "在 行.xlsx 工作表「S」第 3 行起插入 2 行");
+        stubToolOk("insert_rows");
+        stubIndexOk();
+
+        ResponseEntity<String> response = rest.postForEntity(
+                "/api/workspaces/{ws}/operations/{op}/apply", null, String.class, ws, blankInsert);
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+
+        // 后确认的插行整体下移 2 行（6 → 8），values 里的公式引用跟着落到新布局的第 10 行
+        OperationRow filled = operations.find(ws, filledInsert).orElseThrow();
+        assertThat(filled.arguments().path("start_row").asInt()).isEqualTo(8);
+        assertThat(filled.arguments().path("values").get(0).get(1).path("formula").asString())
+                .isEqualTo("=B10*2");
+        // diff 从重排后参数纯算术重建：before 恒 null，公式包装解包展示（无 read_range 网络读）
+        assertThat(filled.diff()).hasSize(2);
+        assertThat(filled.diff().get(0).path("cell").asString()).isEqualTo("A8");
+        assertThat(filled.diff().get(0).path("before").isNull()).isTrue();
+        assertThat(filled.diff().get(0).path("after").asString()).isEqualTo("鼠标垫");
+        assertThat(filled.diff().get(1).path("cell").asString()).isEqualTo("B8");
+        assertThat(filled.diff().get(1).path("before").isNull()).isTrue();
+        assertThat(filled.diff().get(1).path("after").asString()).isEqualTo("=B10*2");
+        // 摘要按重排后参数改写，带上写入行数
+        assertThat(filled.summary()).contains("第 8 行").contains("并写入 1 行数据");
+
+        // 重建 insert_rows diff 不发 read_range：收到的 /v1/tools/call 只有应用那一笔 insert_rows
+        aiService.verify(1, com.github.tomakehurst.wiremock.client.WireMock
+                .postRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
+                        .urlEqualTo("/v1/tools/call")));
+    }
+
+    @Test
     void applyRejectsProposalWhoseTargetRowWasDeleted() throws Exception {
         String ws = createWorkspace("目标已删");
         writeFile(ws, "行.xlsx", "X");
@@ -359,14 +400,22 @@ class OperationsApiTests {
         FileRead file = files.insertPending(ws, "a.xlsx", "xlsx", 8L, "sum");
         String opId = seedOperation(ws, "a.xlsx", "digest-old");
         stubToolOk();
-        stubIndexOk();
+        // index 响应延迟 1.5s：apply 返回时后台重建必然未完成，
+        // 从而能确定性地断言同步 markIndexing 已把文件标成 indexing
+        aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
+                        "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
+                        + "\"error\":null,\"checksum\":\"x\",\"chunks\":[]}").withFixedDelay(1500)));
 
         rest.postForEntity(
                 "/api/workspaces/{ws}/operations/{op}/apply", null, String.class, ws, opId);
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexing");
         awaitIndexRequests(1);
 
         rest.postForEntity(
                 "/api/workspaces/{ws}/operations/{op}/revert", null, String.class, ws, opId);
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexing");
         awaitIndexRequests(2);
 
         aiService.verify(2, com.github.tomakehurst.wiremock.client.WireMock

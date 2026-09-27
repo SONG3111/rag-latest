@@ -2,6 +2,7 @@ package com.raglatest.backend.service;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
@@ -54,12 +55,12 @@ public final class OperationRebase {
                 int bandCount = parsedCount == null || parsedCount == 0 ? 1 : parsedCount;
                 if (delete) {
                     if (bandStart >= start + count) {
-                        return withBand(args, bandKey, bandStart - count);
+                        return withBand(args, bandKey, bandStart - count, toolName, ctx);
                     }
                     if ((toolName.equals("insert_rows") || toolName.equals("insert_columns"))
                             && bandStart >= start) {
                         // 插入点塌进被删带里：最近的合法位置就是带起点
-                        return withBand(args, bandKey, start);
+                        return withBand(args, bandKey, start, toolName, ctx);
                     }
                     if (bandStart + bandCount <= start) {
                         return new Rebased(args, false);
@@ -71,7 +72,7 @@ public final class OperationRebase {
                     return null; // 插入落在待删带内部，带不再连续
                 }
                 if (bandStart >= start) {
-                    return withBand(args, bandKey, bandStart + count);
+                    return withBand(args, bandKey, bandStart + count, toolName, ctx);
                 }
                 return new Rebased(args, false);
             }
@@ -152,10 +153,54 @@ public final class OperationRebase {
         }
     }
 
-    private static Rebased withBand(ObjectNode args, String bandKey, int newValue) {
+    private static Rebased withBand(ObjectNode args, String bandKey, int newValue,
+                                    String toolName, ShiftContext ctx) {
         ObjectNode updated = (ObjectNode) args.deepCopy();
         updated.put(bandKey, newValue);
+        // insert_rows 的 values 随带的平移一起落位，其中的公式引用必须同步平移，
+        // 否则重排后写入的公式仍指向旧布局（update_cells 分支同规则）
+        if (toolName.equals("insert_rows")) {
+            shiftInsertedValues(updated, ctx);
+        }
         return new Rebased(updated, true);
+    }
+
+    /** 逐格平移 values 二维数组里的公式引用（{"formula": ...} 包装与裸 "=..." 均可）。 */
+    private static void shiftInsertedValues(ObjectNode args, ShiftContext ctx) {
+        JsonNode values = args.get("values");
+        if (values == null) {
+            return;
+        }
+        // 早期提案可能把 values 编码成 JSON 字符串（MCP 写入侧 pydantic 才解析）：
+        // 重排时归一成数组，公式平移才有作用对象；畸形输入原样放行，由写入侧报错
+        if (values.isString()) {
+            try {
+                JsonNode parsed = new ObjectMapper().readTree(values.asString());
+                if (!parsed.isArray()) {
+                    return;
+                }
+                values = parsed;
+                args.set("values", parsed);
+            } catch (Exception ex) {
+                return;
+            }
+        }
+        if (!values.isArray()) {
+            return;
+        }
+        ArrayNode shifted = JsonNodeFactory.instance.arrayNode();
+        for (JsonNode row : values) {
+            if (row != null && row.isArray()) {
+                ArrayNode shiftedRow = JsonNodeFactory.instance.arrayNode();
+                for (JsonNode cell : row) {
+                    shiftedRow.add(ctx.shiftValue(cell));
+                }
+                shifted.add(shiftedRow);
+            } else {
+                shifted.add(row);
+            }
+        }
+        args.set("values", shifted);
     }
 
     // ------------------------------------------------------------------ //

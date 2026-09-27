@@ -67,7 +67,14 @@ def summarize_operation(tool_name: str, rel_path: str, arguments: dict[str, Any]
     if tool_name == "set_formula":
         return f"向 {rel_path} 工作表「{arguments.get('sheet_name', '')}」的 {arguments.get('cell', '')} 写入公式"
     if tool_name == "insert_rows":
-        return f"在 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 {arguments.get('start_row')} 行起插入 {arguments.get('count', 1)} 行"
+        summary = (
+            f"在 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 "
+            f"{arguments.get('start_row')} 行起插入 {arguments.get('count', 1)} 行"
+        )
+        values = arguments.get("values")
+        if isinstance(values, list) and values:
+            summary += f"并写入 {len(values)} 行数据"
+        return summary
     if tool_name == "delete_rows":
         return f"删除 {rel_path} 工作表「{arguments.get('sheet_name', '')}」第 {arguments.get('start_row')} 行起的 {arguments.get('count', 1)} 行（不可逆）"
     if tool_name == "format_range":

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.raglatest.backend.service.OperationRebase.Rebased;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -122,6 +123,78 @@ class OperationRebaseTests {
         assertThat(shifted.moved()).isTrue();
         assertThat(shifted.arguments().path("updates").get(0).path("value").path("formula").asString())
                 .isEqualTo("=B5*2");
+    }
+
+    // ---------------- insert_rows 带 values（插行+填数一笔提案） ---------------- //
+
+    @Test
+    void insertRowsValuesFollowTheBandOnRowAxis() {
+        // 应用 insert(4,2)：待确认插行带 5→7，values 里的公式引用同步下移
+        // （包装与裸 "=..." 两种形态都要平移）
+        Rebased shifted = row("insert_rows",
+                "{\"sheet_name\":\"订单\",\"start_row\":5,\"count\":1,\"values\":["
+                        + "[\"鼠标垫\",{\"formula\":\"=B5*2\"}],"
+                        + "[\"合计\",\"=B6+1\"]]}",
+                false, 4, 2).call();
+        assertThat(shifted.moved()).isTrue();
+        assertThat(shifted.arguments().path("start_row").asInt()).isEqualTo(7);
+        assertThat(shifted.arguments().path("values").get(0).get(1).path("formula").asString())
+                .isEqualTo("=B7*2");
+        assertThat(shifted.arguments().path("values").get(1).get(1).asString()).isEqualTo("=B8+1");
+    }
+
+    @Test
+    void insertRowsValuesFollowCollapseIntoDeletedBand() {
+        // 应用 delete(4,3)：插入点 5 塌到带起点 4，公式引用同样上移 3
+        Rebased collapsed = row("insert_rows",
+                "{\"sheet_name\":\"订单\",\"start_row\":5,\"count\":1,"
+                        + "\"values\":[[\"x\",{\"formula\":\"=B8*2\"}]]}",
+                true, 4, 3).call();
+        assertThat(collapsed.moved()).isTrue();
+        assertThat(collapsed.arguments().path("start_row").asInt()).isEqualTo(4);
+        assertThat(collapsed.arguments().path("values").get(0).get(1).path("formula").asString())
+                .isEqualTo("=B5*2");
+    }
+
+    @Test
+    void insertRowsValuesStayUntouchedWhenBandDoesNotMove() {
+        // 插行带在应用操作上方：values 原样保留（moved=false 时不应改写参数）
+        Rebased untouched = row("insert_rows",
+                "{\"sheet_name\":\"订单\",\"start_row\":2,\"count\":1,"
+                        + "\"values\":[[\"x\",{\"formula\":\"=B5*2\"}]]}",
+                false, 4, 2).call();
+        assertThat(untouched.moved()).isFalse();
+        assertThat(untouched.arguments().path("start_row").asInt()).isEqualTo(2);
+        assertThat(untouched.arguments().path("values").get(0).get(1).path("formula").asString())
+                .isEqualTo("=B5*2");
+    }
+
+    @Test
+    void columnBandsLeaveRowBandValuesAlone() {
+        // 列向应用操作对行带提案整体放行（insert_rows 没有 start_col），
+        // values 不该被误改
+        Rebased untouched = col("insert_rows",
+                "{\"sheet_name\":\"订单\",\"start_row\":5,\"count\":1,"
+                        + "\"values\":[[\"x\",{\"formula\":\"=B5*2\"}]]}",
+                false, 2, 2, null).call();
+        assertThat(untouched.moved()).isFalse();
+        assertThat(untouched.arguments().path("values").get(0).get(1).path("formula").asString())
+                .isEqualTo("=B5*2");
+    }
+
+    @Test
+    void stringEncodedValuesAreNormalizedAndShifted() {
+        // 旧提案可能把 values 编码成 JSON 字符串（MCP 写入侧 pydantic 才解析）：
+        // 重排时归一成数组并平移其中的公式引用，否则公式引用留在旧布局
+        Rebased shifted = row("insert_rows",
+                "{\"sheet_name\":\"订单\",\"start_row\":5,\"count\":1,"
+                        + "\"values\":\"[[\\\"x\\\",{\\\"formula\\\":\\\"=B5*2\\\"}]]\"}",
+                false, 4, 2).call();
+        assertThat(shifted.moved()).isTrue();
+        assertThat(shifted.arguments().path("start_row").asInt()).isEqualTo(7);
+        JsonNode values = shifted.arguments().path("values");
+        assertThat(values.isArray()).isTrue();
+        assertThat(values.get(0).get(1).path("formula").asString()).isEqualTo("=B7*2");
     }
 
     @Test

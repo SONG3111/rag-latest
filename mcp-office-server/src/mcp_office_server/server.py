@@ -342,11 +342,15 @@ def insert_rows(
     sheet_name: str,
     start_row: int,
     count: int = 1,
+    values: list[list] | None = None,
     expected_digest: str | None = None,
 ) -> str:
-    """在 Excel 指定行位置**之前**插入空行，原有行整体下移。**会写入用户的文件。**
+    """在 Excel 指定行位置**之前**插入行，原有行整体下移。**会写入用户的文件。**
 
-    start_row 从 1 开始计数，count 为插入行数。
+    start_row 从 1 开始计数，count 为插入行数。values（可选）是与新行对应的二维
+    数组，从 A 列起写入插入出的行；"在表格中间插入 N 行数据"必须用本工具一次提交，
+    不要拆成"先 insert_rows 再 update_cells"两笔提案——新行坐标在当前文件里尚不
+    存在，两笔提案的应用顺序不同会产生错位或覆盖。
     向表格**末尾追加数据**不需要本工具：直接用 update_cells 写入最后一行数据的
     下一行即可，先插空行再写会把已有行挤到错误的位置。
     """
@@ -354,7 +358,8 @@ def insert_rows(
         resolved = sandbox.resolve_document(path)
         return _ok(
             excel_ops.insert_rows(
-                resolved, sheet_name, start_row, count, expected_digest=expected_digest
+                resolved, sheet_name, start_row, count,
+                values=values, expected_digest=expected_digest,
             )
         )
     except ToolError as exc:
