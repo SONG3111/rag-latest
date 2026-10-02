@@ -201,8 +201,10 @@ $env:PYTHONPATH = "ai-service"; ./.venv312/python.exe -m uvicorn app.main:app --
 # macOS / Linux
 # PYTHONPATH=ai-service .venv312/bin/python -m uvicorn app.main:app --reload --port 8001
 
-# 另开一个终端，启动 Java 业务后端（从仓库根目录跑，Maven wrapper 会自动拉 Maven）
-cd backend-java && ./mvnw spring-boot:run   # Windows 用 mvnw.cmd
+# 另开一个终端，启动 Java 业务后端（从 backend-java 目录跑，Maven wrapper 会自动拉 Maven）
+# DATA_DIR 必须显式指回仓库根：./data 相对进程工作目录解析，不设会与 ai-service 的
+# data/ 分叉（上传的文件 ai-service 读不到），详见 docs/bugs/2026-10-02-local-datadir-split.md
+cd backend-java && DATA_DIR=../data ./mvnw spring-boot:run   # Windows 用 mvnw.cmd
 ```
 
 对外端点是 Java 后端 `http://127.0.0.1:8000`（健康检查 `/health`，会聚合

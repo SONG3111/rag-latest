@@ -50,12 +50,15 @@ services:
   # 官方镜像刻意不带默认 HEALTHCHECK，标准做法是 rabbitmq-diagnostics ping
   #（见 docker-library/docs/rabbitmq README 与 RabbitMQ monitoring 文档）。
   # 队列与消息均持久化，volume 必须挂——broker 磁盘丢了任务才真的丢。
+  # 5672 映射到宿主机回环：本地裸跑（mvnw spring-boot:run）连 127.0.0.1:5672 用；
+  # 容器间走服务名，不受影响。
   rabbitmq:
     image: rabbitmq:4-management
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     ports:
-      # 管理界面仅本机访问（观测队列堆积/死信）。
+      # AMQP 仅供本机 backend 裸跑；管理界面仅本机访问（观测队列堆积/死信）。
+      - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
@@ -67,11 +70,14 @@ services:
 
   # 读路径缓存（tools/preview/health/retrieval-corpus）：appendonly 落盘，
   # healthcheck 用 redis-cli ping（社区标准写法，官方镜像不带 HEALTHCHECK）。
+  # 6379 映射到宿主机回环，理由同 rabbitmq 的 5672。
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
