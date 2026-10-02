@@ -4,6 +4,7 @@ import com.raglatest.backend.api.dto.Dtos.FileRead;
 import com.raglatest.backend.api.dto.Dtos.IndexingResponse;
 import com.raglatest.backend.api.dto.Dtos.WorkspaceCreate;
 import com.raglatest.backend.api.dto.Dtos.WorkspaceRead;
+import com.raglatest.backend.config.CacheConfig;
 import com.raglatest.backend.internal.AiServiceClient;
 import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.service.FileStorage;
@@ -18,6 +19,7 @@ import java.util.Comparator;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -87,6 +89,8 @@ public class WorkspaceController {
         return requireWorkspace(workspaceId);
     }
 
+    /** 删除工作区：chunks 级联清掉，corpus 缓存里这份语料一并失效。 */
+    @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId")
     @DeleteMapping("/workspaces/{workspaceId}")
     public ResponseEntity<Void> removeWorkspace(@PathVariable String workspaceId) {
         requireWorkspace(workspaceId);
@@ -171,6 +175,8 @@ public class WorkspaceController {
         return results;
     }
 
+    /** 删文件连带清 chunks 与向量；corpus 缓存失效，检索立即看不到旧分块。 */
+    @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId")
     @DeleteMapping("/workspaces/{workspaceId}/files/{fileId}")
     public ResponseEntity<Void> removeFile(@PathVariable String workspaceId, @PathVariable String fileId) {
         requireWorkspace(workspaceId);

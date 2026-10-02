@@ -3,11 +3,13 @@ package com.raglatest.backend.service;
 import com.raglatest.backend.api.ApiException;
 import com.raglatest.backend.api.dto.Dtos.FileRead;
 import com.raglatest.backend.api.dto.Dtos.IndexingResponse;
+import com.raglatest.backend.config.CacheConfig;
 import com.raglatest.backend.internal.AiServiceClient;
 import com.raglatest.backend.store.ChunkRepository;
 import com.raglatest.backend.store.DocumentFileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 
@@ -35,7 +37,12 @@ public class IndexingService {
         this.chunks = chunks;
     }
 
-    /** 索引（或重建索引）单个文件，返回对外统一的 IndexingResponse。 */
+    /**
+     * 索引（或重建索引）单个文件，返回对外统一的 IndexingResponse。
+     * 分块落库后使该工作区的检索语料缓存失效（失败路径不失效：语料未变，60s TTL 兜底）。
+     */
+    @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId",
+            condition = "#result != null && #result.status() == 'indexed'")
     public IndexingResponse index(String workspaceId, String fileId) {
         FileRead record = files.findInWorkspace(workspaceId, fileId)
                 .orElseThrow(() -> ApiException.notFound("file not found"));

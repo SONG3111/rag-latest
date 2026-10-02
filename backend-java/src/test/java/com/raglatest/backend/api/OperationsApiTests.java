@@ -428,6 +428,39 @@ class OperationsApiTests {
                         .containing(file.id())));
     }
 
+    @Test
+    void applyEvictsPreviewCache() throws Exception {
+        String ws = createWorkspace("预览失效");
+        writeFile(ws, "a.xlsx", "ORIGINAL");
+        seedOperation(ws, "a.xlsx", "digest-old");
+        stubToolOk();
+        stubIndexOk();
+        aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
+                .get(com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo(
+                        "/v1/workspaces/" + ws + "/preview"))
+                .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
+                        "{\"kind\": \"excel\", \"rows\": [[\"旧值\"]]}")));
+
+        // 两次预览只打一次上游：@Cacheable 命中
+        rest.getForEntity("/api/workspaces/{ws}/preview?file=a.xlsx&location=S!A1",
+                String.class, ws);
+        rest.getForEntity("/api/workspaces/{ws}/preview?file=a.xlsx&location=S!A1",
+                String.class, ws);
+        aiService.verify(1, com.github.tomakehurst.wiremock.client.WireMock
+                .getRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
+                        .urlPathEqualTo("/v1/workspaces/" + ws + "/preview")));
+
+        // apply 改了文件内容：aiPreview 全表清空，下一次预览重新穿透
+        String opId = operations.listPending(ws).get(0).id();
+        rest.postForEntity(
+                "/api/workspaces/{ws}/operations/{op}/apply", null, String.class, ws, opId);
+        rest.getForEntity("/api/workspaces/{ws}/preview?file=a.xlsx&location=S!A1",
+                String.class, ws);
+        aiService.verify(2, com.github.tomakehurst.wiremock.client.WireMock
+                .getRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
+                        .urlPathEqualTo("/v1/workspaces/" + ws + "/preview")));
+    }
+
     // ---------------- 列表契约（对齐 python OperationRead） ---------------- //
 
     @Test

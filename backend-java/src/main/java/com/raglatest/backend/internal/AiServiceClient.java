@@ -1,12 +1,14 @@
 package com.raglatest.backend.internal;
 
 import com.raglatest.backend.api.ApiException;
+import com.raglatest.backend.config.CacheConfig;
 import com.raglatest.backend.config.RagProperties;
 import com.raglatest.backend.config.ResilienceConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import java.time.Duration;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
@@ -79,7 +81,8 @@ public class AiServiceClient {
     // ------------------------------------------------------------------ //
     // 幂等读：重试（瞬时故障）+ 熔断 + 并发限制
     // ------------------------------------------------------------------ //
-    /** 健康检查要快速返回，失败即降级，因此不重试。 */
+    /** 健康检查要快速返回，失败即降级，因此不重试；10s 缓存只削峰不改结果。 */
+    @Cacheable(cacheNames = CacheConfig.AI_HEALTH, key = "'health'")
     @ConcurrencyLimit(limit = 8, policy = ConcurrencyLimit.ThrottlePolicy.REJECT)
     public JsonNode getHealth() {
         return readsCircuitBreaker.decorateSupplier(() -> get("/health")).get();
@@ -93,6 +96,7 @@ public class AiServiceClient {
      * 2 次逻辑失败即开闸，属有意的快速保护）。{@code timeout} 给整轮（含重试与退避）
      * 设总预算，避免 3 × 30s 的最坏阻塞。</p>
      */
+    @Cacheable(cacheNames = CacheConfig.AI_TOOLS, key = "'all'")
     @Retryable(maxRetries = 2, delay = 200, multiplier = 2.0, jitter = 100, maxDelay = 2000,
             timeout = 45000, includes = TransientAiServiceException.class)
     @ConcurrencyLimit(limit = 8, policy = ConcurrencyLimit.ThrottlePolicy.REJECT)
@@ -100,7 +104,10 @@ public class AiServiceClient {
         return readsCircuitBreaker.decorateSupplier(() -> get("/v1/tools")).get();
     }
 
-    /** 引用出处预览：按 location 解析成读窗口后经 ai-service 的 MCP 读工具取原文。 */
+    /** 引用出处预览：按 location 解析成读窗口后经 ai-service 的 MCP 读工具取原文。
+     *  5 分钟缓存，写操作（apply/revert）会整表清空。 */
+    @Cacheable(cacheNames = CacheConfig.AI_PREVIEW,
+            key = "#workspaceId + ':' + #file + ':' + #location")
     @Retryable(maxRetries = 2, delay = 200, multiplier = 2.0, jitter = 100, maxDelay = 2000,
             timeout = 45000, includes = TransientAiServiceException.class)
     @ConcurrencyLimit(limit = 8, policy = ConcurrencyLimit.ThrottlePolicy.REJECT)

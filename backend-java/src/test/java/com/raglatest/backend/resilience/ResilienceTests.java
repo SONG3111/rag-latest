@@ -90,6 +90,9 @@ class ResilienceTests {
         }
         registry.add("rag.data-dir", () -> dataDir.toAbsolutePath().toString());
         registry.add("rag.ai-service.base-url", () -> "http://127.0.0.1:" + aiService.port());
+        // 本类直击重试/熔断语义：listTools/preview/getHealth 已挂 @Cacheable，
+        // 命中缓存会吞掉后续 WireMock 请求、破坏 scenario 状态机，这里显式关闭缓存。
+        registry.add("spring.cache.type", () -> "none");
         registry.add("rag.resilience.circuit-breaker.minimum-number-of-calls", () -> "3");
         registry.add("rag.resilience.circuit-breaker.sliding-window-size", () -> "10");
         registry.add("rag.resilience.circuit-breaker.wait-duration-in-open-state", () -> "1s");
