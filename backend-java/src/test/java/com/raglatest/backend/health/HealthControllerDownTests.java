@@ -10,10 +10,10 @@ import com.raglatest.backend.internal.AiServiceClient;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /** ai-service 不可达时仍返回 200 + 降级字段（与原版 MCP 降级语义一致）。 */
@@ -22,6 +22,10 @@ import org.springframework.test.web.servlet.MockMvc;
 @EnableConfigurationProperties(RagProperties.class)
 @TestPropertySource(properties = "rag.ai-service.base-url=http://127.0.0.1:1")
 class HealthControllerDownTests {
+
+    /** 切片上下文没有 Redis/RabbitMQ 连接工厂：基础设施探针以 mock 提供（默认 false）。 */
+    @MockitoBean
+    InfraHealth infra;
 
     @Autowired
     MockMvc mockMvc;
@@ -34,6 +38,8 @@ class HealthControllerDownTests {
                 .andExpect(jsonPath("$.ai_service").value("down"))
                 .andExpect(jsonPath("$.mcp_started").value(false))
                 .andExpect(jsonPath("$.tools").value(0))
-                .andExpect(jsonPath("$.mcp_error").isNotEmpty());
+                .andExpect(jsonPath("$.mcp_error").isNotEmpty())
+                .andExpect(jsonPath("$.redis").value("down"))
+                .andExpect(jsonPath("$.queue").value("down"));
     }
 }

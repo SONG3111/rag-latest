@@ -14,12 +14,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+
+import static org.mockito.Mockito.when;
 
 /**
  * /health 聚合行为：ai-service 可达时透传 mcp_started/tools 等字段。
@@ -32,6 +34,10 @@ class HealthControllerUpTests {
 
     static WireMockServer aiService = new WireMockServer(
             WireMockConfiguration.wireMockConfig().dynamicPort());
+
+    /** 切片上下文没有 Redis/RabbitMQ 连接工厂：基础设施探针以 mock 提供。 */
+    @MockitoBean
+    InfraHealth infra;
 
     @DynamicPropertySource
     static void aiServiceUrl(DynamicPropertyRegistry registry) {
@@ -61,11 +67,15 @@ class HealthControllerUpTests {
 
     @Test
     void passesThroughAiServiceHealth() throws Exception {
+        when(infra.redisUp()).thenReturn(true);
+        when(infra.queueUp()).thenReturn(true);
         mockMvc.perform(get("/health"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("ok"))
                 .andExpect(jsonPath("$.ai_service").value("up"))
                 .andExpect(jsonPath("$.mcp_started").value(true))
-                .andExpect(jsonPath("$.tools").value(22));
+                .andExpect(jsonPath("$.tools").value(22))
+                .andExpect(jsonPath("$.redis").value("up"))
+                .andExpect(jsonPath("$.queue").value("up"));
     }
 }

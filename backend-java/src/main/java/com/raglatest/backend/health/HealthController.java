@@ -13,8 +13,10 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * 对外健康检查：保持原 Python 版 /health 的响应形状
- * （status/mcp_started/mcp_error/tools），另加 ai_service 字段标注 AI 服务可达性。
- * 即使 ai-service 不可达也返回 200 + 降级字段，让 UI 能解释哪里坏了（与原版 MCP 降级语义一致）。
+ * （status/mcp_started/mcp_error/tools），另加 ai_service 字段标注 AI 服务可达性，
+ * 以及 redis/queue 两个基础设施维度（任务队列与缓存是 Redis/RabbitMQ 强依赖后
+ * 新增的排障入口）。即使 ai-service 或中间件不可达也返回 200 + 降级字段，
+ * 让 UI 能解释哪里坏了（与原版 MCP 降级语义一致）。
  */
 @RestController
 public class HealthController {
@@ -23,9 +25,11 @@ public class HealthController {
     private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
 
     private final AiServiceClient aiService;
+    private final InfraHealth infra;
 
-    public HealthController(AiServiceClient aiService) {
+    public HealthController(AiServiceClient aiService, InfraHealth infra) {
         this.aiService = aiService;
+        this.infra = infra;
     }
 
     @GetMapping("/health")
@@ -45,6 +49,8 @@ public class HealthController {
             body.put("mcp_error", describeDegraded(ex));
             body.put("tools", 0);
         }
+        body.put("redis", infra.redisUp() ? "up" : "down");
+        body.put("queue", infra.queueUp() ? "up" : "down");
         return body;
     }
 

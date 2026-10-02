@@ -1,5 +1,6 @@
 package com.raglatest.backend.api;
 
+import com.raglatest.backend.health.InfraHealth;
 import com.raglatest.backend.internal.AiServiceClient;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -25,10 +26,13 @@ public class SystemController {
 
     private final CircuitBreakerRegistry circuitBreakers;
     private final Bulkhead chatTurnBulkhead;
+    private final InfraHealth infra;
 
-    public SystemController(CircuitBreakerRegistry circuitBreakers, Bulkhead chatTurnBulkhead) {
+    public SystemController(CircuitBreakerRegistry circuitBreakers, Bulkhead chatTurnBulkhead,
+                            InfraHealth infra) {
         this.circuitBreakers = circuitBreakers;
         this.chatTurnBulkhead = chatTurnBulkhead;
+        this.infra = infra;
     }
 
     @GetMapping("/resilience")
@@ -45,6 +49,11 @@ public class SystemController {
         Bulkhead.Metrics metrics = chatTurnBulkhead.getMetrics();
         bulkhead.put("available", metrics.getAvailableConcurrentCalls());
         bulkhead.put("max", metrics.getMaxAllowedConcurrentCalls());
+
+        // 索引任务队列的堆积水位：持续上涨说明嵌入跟不上写/上传的速度。
+        ObjectNode queue = body.putObject("indexing_queue");
+        queue.put("depth", infra.queueDepth());
+        queue.put("reachable", infra.queueUp());
         return body;
     }
 
