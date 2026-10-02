@@ -64,6 +64,24 @@
       <artifactId>reactor-netty-http</artifactId>
     </dependency>
 
+    <!-- 索引任务队列（RabbitMQ，写后重建/上传索引全异步化）。
+         消息体用 String + Jackson 3 ObjectMapper 手动序列化，刻意不用
+         spring-amqp 的 Jackson2JsonMessageConverter——其绑定 Jackson 2，
+         与 Boot 4 的 Jackson 3 有同款摩擦（见上文 resilience4j#2351 先例）。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
+    <!-- 读路径缓存（tools/preview/health/retrieval-corpus），Lettuce 客户端。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-cache</artifactId>
+    </dependency>
+
     <!-- 韧性容错：熔断（含 Reactor 操作符）与信号量舱壁。核心模块无 Jackson 依赖。 -->
     <dependency>
       <groupId>io.github.resilience4j</groupId>
@@ -100,6 +118,23 @@
       <version>${wiremock.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- 可选容器集成测试（命名 *IT，由 failsafe 跑，不进默认 mvnw test；
+         默认套件保持全 mock、零 Docker 依赖）。 -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-rabbitmq</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.redis</groupId>
+      <artifactId>testcontainers-redis</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -107,6 +142,19 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <!-- *IT 集成测试（Testcontainers）：只在 verify 阶段跑，需要本机 Docker。 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

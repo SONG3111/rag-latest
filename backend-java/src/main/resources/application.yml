@@ -15,6 +15,31 @@ spring:
         journal_mode: "WAL"
         busy_timeout: "30000"
         foreign_keys: "true"
+  # 索引任务队列：上传/写后重建全部经 RabbitMQ 持久化（拓扑声明见 AmqpConfig）。
+  # 消费失败不 requeue（毒消息/未预期异常进 DLQ 观测，业务失败由文件状态机
+  # failed + reindex 端点恢复）；并发 1 对齐原单线程 reindex executor。
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    publisher-confirm-type: correlated
+    listener:
+      simple:
+        concurrency: 1
+        max-concurrency: 1
+        default-requeue-rejected: false
+  # 读路径缓存（tools/preview/health/retrieval-corpus）。
+  # 连接失败经 CacheErrorHandler 降级为穿透（见 CacheConfig），缓存挂了只是变慢。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+  cache:
+    type: redis
+    redis:
+      time-to-live: 10m
 
 server:
   port: 8000
