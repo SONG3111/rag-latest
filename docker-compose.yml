@@ -10,12 +10,20 @@ services:
     environment:
       DATA_DIR: /app/data
       AI_SERVICE_URL: http://ai-service:8001
+      RABBITMQ_HOST: rabbitmq
+      REDIS_HOST: redis
     volumes:
       - ./data:/app/data
     ports:
       - "8000:8000"
     depends_on:
-      - ai-service
+      ai-service:
+        condition: service_started
+      # 索引任务队列与读缓存是启动强依赖：队列/缓存未就绪前不拉起后端。
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   # Python AI 服务：agent/检索/嵌入 + MCP 子进程，仅内网 8001。
@@ -38,6 +46,39 @@ services:
       - "8001"
     restart: unless-stopped
 
+  # 索引任务队列（持久化）：上传/写后重建全异步化，backend 是唯一生产/消费者。
+  # 官方镜像刻意不带默认 HEALTHCHECK，标准做法是 rabbitmq-diagnostics ping
+  #（见 docker-library/docs/rabbitmq README 与 RabbitMQ monitoring 文档）。
+  # 队列与消息均持久化，volume 必须挂——broker 磁盘丢了任务才真的丢。
+  rabbitmq:
+    image: rabbitmq:4-management
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      # 管理界面仅本机访问（观测队列堆积/死信）。
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # 读路径缓存（tools/preview/health/retrieval-corpus）：appendonly 落盘，
+  # healthcheck 用 redis-cli ping（社区标准写法，官方镜像不带 HEALTHCHECK）。
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
@@ -47,3 +88,7 @@ services:
     ports:
       - "5173:80"
     restart: unless-stopped
+
+volumes:
+  rabbitmq-data:
+  redis-data:

@@ -178,10 +178,17 @@ huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir C:/code/agent/rag/m
 > `EMBEDDING_DIMENSIONS` 必须与模型实际输出维度一致。bge-m3 是 1024 维；
 > 换成 `bge-large-zh-v1.5` 则需要改成 1024 也可以，但若是别的模型请先跑上面的脚本确认。
 
-### 3. 启动后端（AI 服务 + Java 业务后端）
+### 3. 启动后端（中间件 + AI 服务 + Java 业务后端）
 
 后端拆成两个进程：`ai-service/`（FastAPI，AI 能力 + MCP 子进程，端口 8001，仅内网）
 和 `backend-java/`（Spring Boot，业务端点与 SQLite，端口 8000，唯一对前端）。
+Java 后端还依赖两个基础中间件：**RabbitMQ**（索引任务队列：上传/写后重建全部异步持久化）
+与 **Redis**（tools/preview/health/检索语料的读缓存），本地启动前先起容器：
+
+```bash
+# 一次性：起 RabbitMQ（含管理界面 http://127.0.0.1:15672）与 Redis
+docker compose up -d rabbitmq redis
+```
 
 ```bash
 # Python AI 服务（推荐 Python 3.12；需要 JDK 21+ 跑 Java 侧）
@@ -305,8 +312,13 @@ cd frontend && npm run check:sse && npm run check:sse:live
 # AI 服务：检索、Agent 门控、内部端点（fake LLM，不调真实模型）
 ./.venv312/python.exe -m pytest ai-service/tests -q
 
-# Java 业务后端：CRUD、SSE 中继与落库（WireMock 桩掉 ai-service）
+# Java 业务后端：CRUD、SSE 中继与落库（WireMock 桩掉 ai-service；RabbitMQ/Redis
+# 一律 mock，零 Docker 依赖）
 cd backend-java && ./mvnw test    # Windows 用 mvnw.cmd
+
+# Java 可选容器集成测试（真实 RabbitMQ 队列端到端 + Redis 缓存往返，需要本机 Docker；
+# 命名 *IT 由 failsafe 跑，不进上面的默认 mvnw test）
+cd backend-java && ./mvnw verify
 
 # 一键全跑（含上述三个套件）
 ./.venv312/python.exe scripts/run_all_tests.py
