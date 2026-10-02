@@ -16,7 +16,9 @@ const nextId = (prefix: string) => `${prefix}-${Date.now()}-${(turnCounter += 1)
 
 // 审批写入/还原后的 indexing 轮询：句柄是纯计时器、不是 UI 状态，放模块级。
 const INDEXING_POLL_INTERVAL_MS = 2_000
-const INDEXING_POLL_LIMIT_MS = 30_000
+// 上传/重建索引全异步化后走 RabbitMQ 队列（多文件串行索引），30 秒不够用；
+// 与后端单文件索引预算（chat-turn-timeout 300s）对齐。
+const INDEXING_POLL_LIMIT_MS = 300_000
 let indexingPollTimer: ReturnType<typeof setTimeout> | null = null
 
 export const useWorkspaceStore = defineStore('workspace', {
@@ -171,16 +173,19 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.operations = operations
     },
 
+    /** 上传已异步化：接口立即返回 indexing 快照，轮询文件列表等索引完成。 */
     async upload(files: File[]) {
       if (!this.activeWorkspaceId) return
       await api.uploadFiles(this.activeWorkspaceId, files)
       await this.loadFiles()
+      this.pollIndexingFiles()
     },
 
     async reindex(fileId: string) {
       if (!this.activeWorkspaceId) return
       await api.reindexFile(this.activeWorkspaceId, fileId)
       await this.loadFiles()
+      this.pollIndexingFiles()
     },
 
     async removeFile(fileId: string) {
