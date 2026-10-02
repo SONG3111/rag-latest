@@ -4,11 +4,14 @@ import com.raglatest.backend.api.dto.Dtos.CorpusChunk;
 import com.raglatest.backend.api.dto.Dtos.CorpusResponse;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -22,10 +25,12 @@ import tools.jackson.databind.ObjectMapper;
 public class ChunkRepository {
 
     private final JdbcClient jdbc;
+    private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper mapper;
 
-    public ChunkRepository(JdbcClient jdbc, ObjectMapper mapper) {
+    public ChunkRepository(JdbcClient jdbc, JdbcTemplate jdbcTemplate, ObjectMapper mapper) {
         this.jdbc = jdbc;
+        this.jdbcTemplate = jdbcTemplate;
         this.mapper = mapper;
     }
 
@@ -72,38 +77,43 @@ public class ChunkRepository {
      * 用一次「删旧 + 插新」替换某文件的全部分块（reindex 语义）。分块 id 与 parent_id 由
      * ai-service 生成（与 Qdrant payload.chunk_id 一致），此处原样落库，不再重新生成。
      * 返回插入的行数。
+     *
+     * <p>事务包裹 + 批量绑定：@Transactional 保证删旧与插新的原子性（此前逐行自动提交，
+     * 删旧后插到一半崩溃会永久丢该文件分块）；INSERT 走 {@link JdbcTemplate#batchUpdate}
+     * （JdbcClient 无批量 API），同一事务内一次刷盘。写法迁移自 Spring Framework
+     * JDBC Batch Operations 官方文档；xerial sqlite-jdbc 的 batch 在事务内才真正省
+     * 每行一个隐式事务的开销。</p>
      */
+    @Transactional
     public int replaceFileChunks(String workspaceId, String fileId, JsonNode chunks) {
-        jdbc.sql("DELETE FROM chunks WHERE file_id = :file")
-                .param("file", fileId)
-                .update();
+        jdbcTemplate.update("DELETE FROM chunks WHERE file_id = ?", fileId);
         Timestamp now = Timestamp.from(Instant.now());
-        int inserted = 0;
+        List<Object[]> rows = new ArrayList<>();
         for (JsonNode chunk : chunks) {
             JsonNode parent = chunk.get("parent_id");
-            jdbc.sql("""
-                            INSERT INTO chunks
-                                (id, workspace_id, file_id, parent_id, level, ordinal, text,
-                                 location, meta, token_counts, token_length, created_at)
-                            VALUES (:id, :ws, :file, :parent, :level, :ordinal, :text,
-                                    :location, :meta, :counts, :length, :created)
-                            """)
-                    .param("id", chunk.path("id").asString())
-                    .param("ws", workspaceId)
-                    .param("file", fileId)
-                    .param("parent", parent == null || parent.isNull() ? null : parent.asString())
-                    .param("level", chunk.path("level").asString("child"))
-                    .param("ordinal", chunk.path("ordinal").asInt(0))
-                    .param("text", chunk.path("text").asString(""))
-                    .param("location", chunk.path("location").asString(""))
-                    .param("meta", jsonText(chunk.get("meta")))
-                    .param("counts", jsonText(chunk.get("token_counts")))
-                    .param("length", chunk.path("token_length").asInt(0))
-                    .param("created", now)
-                    .update();
-            inserted++;
+            rows.add(new Object[] {
+                    chunk.path("id").asString(),
+                    workspaceId,
+                    fileId,
+                    parent == null || parent.isNull() ? null : parent.asString(),
+                    chunk.path("level").asString("child"),
+                    chunk.path("ordinal").asInt(0),
+                    chunk.path("text").asString(""),
+                    chunk.path("location").asString(""),
+                    jsonText(chunk.get("meta")),
+                    jsonText(chunk.get("token_counts")),
+                    chunk.path("token_length").asInt(0),
+                    now});
         }
-        return inserted;
+        if (!rows.isEmpty()) {
+            jdbcTemplate.batchUpdate("""
+                    INSERT INTO chunks
+                        (id, workspace_id, file_id, parent_id, level, ordinal, text,
+                         location, meta, token_counts, token_length, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, rows);
+        }
+        return rows.size();
     }
 
     private String jsonText(JsonNode node) {

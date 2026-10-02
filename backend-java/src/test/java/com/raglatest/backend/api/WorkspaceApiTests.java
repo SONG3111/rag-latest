@@ -114,14 +114,14 @@ class WorkspaceApiTests {
         rest = template;
     }
 
-    /** 上传/重建索引现在都会调用 ai-service 的 /v1/index；默认桩为空分块。 */
+    /** 消费者批量调 ai-service 的 /v1/index-batch（数组响应，与请求文件同序）；默认桩为空分块。 */
     @BeforeEach
     void stubIndexing() {
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
-                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index-batch"))
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
-                        "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
-                        + "\"error\":null,\"checksum\":\"deadbeef\",\"chunks\":[]}")));
+                        "[{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
+                        + "\"error\":null,\"checksum\":\"deadbeef\",\"chunks\":[]}]")));
     }
 
     private static final byte[] XLSX_BYTES = "not-really-xlsx-but-nonempty".getBytes();
@@ -248,20 +248,21 @@ class WorkspaceApiTests {
         org.mockito.Mockito.verify(reindexQueue, org.mockito.Mockito.times(2))
                 .enqueue(ws, fileId, "a.xlsx");
 
-        // 用带分块行的应答覆盖默认桩：验证消费者把 /v1/index 返回的行原样落库
-        //（AMQP 传输本身由 ReindexFlowIT 覆盖，这里直驱消费方法）。
+        // 用带分块行的应答覆盖默认桩：验证消费者把 /v1/index-batch 返回的行原样落库
+        //（AMQP 传输本身由 ReindexFlowIT 覆盖，这里直驱消费方法；批量响应是数组）。
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
-                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index-batch"))
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson("""
-                        {"status":"indexed","chunk_count":1,"vector_count":1,"error":null,
+                        [{"status":"indexed","chunk_count":1,"vector_count":1,"error":null,
                          "checksum":"abc","chunks":[
                           {"id":"p1","parent_id":null,"level":"parent","ordinal":0,
                            "text":"表头","location":"销售!第1行","meta":{},"token_counts":{},"token_length":2},
                           {"id":"c1","parent_id":"p1","level":"child","ordinal":1,
                            "text":"A型,1000","location":"销售!第2行","meta":{"kind":"excel"},
-                           "token_counts":{"total":4},"token_length":4}]}
+                           "token_counts":{"total":4},"token_length":4}]}]
                         """)));
-        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, fileId, "a.xlsx")));
+        consumer.onReindexTasks(java.util.List.of(
+                mapper.writeValueAsString(new ReindexTask(ws, fileId, "a.xlsx"))));
 
         ResponseEntity<String> list = rest.getForEntity(
                 "/api/workspaces/{ws}/files", String.class, ws);

@@ -134,6 +134,33 @@ public class AiServiceClient {
         return post("/v1/index", body);
     }
 
+    /**
+     * 批量索引：一次请求处理多文件（ai-service 跨文件合并嵌入）。返回结果数组，
+     * 顺序与请求 files 一致，单个元素与 {@link #indexFile} 的响应同构。
+     * 超时按文件数放大（每文件一份单文件预算，6 倍封顶）：批量端点在 ai-service
+     * 侧串行处理整批，300s 的单文件预算在多文件排队时会被打穿。
+     */
+    public java.util.List<JsonNode> indexBatch(String workspaceId,
+                                               java.util.List<String[]> files) {
+        java.util.List<java.util.Map<String, String>> entries = new java.util.ArrayList<>();
+        for (String[] file : files) {
+            java.util.Map<String, String> entry = new java.util.LinkedHashMap<>();
+            entry.put("file_id", file[0]);
+            entry.put("rel_path", file[1]);
+            entries.add(entry);
+        }
+        java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("workspace_id", workspaceId);
+        body.put("files", entries);
+        int multiplier = Math.max(1, Math.min(files.size(), 6));
+        JsonNode result = post("/v1/index-batch", body, longOperationTimeout.multipliedBy(multiplier));
+        java.util.List<JsonNode> results = new java.util.ArrayList<>();
+        if (result.isArray()) {
+            result.forEach(results::add);
+        }
+        return results;
+    }
+
     /** 按名执行一个 MCP 工具并返回其 {"ok": ...} 信封（审批通过后由业务层调用写工具）。 */
     public JsonNode callTool(String tool, JsonNode arguments) {
         java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
@@ -143,6 +170,10 @@ public class AiServiceClient {
     }
 
     private JsonNode post(String path, Object body) {
+        return post(path, body, longOperationTimeout);
+    }
+
+    private JsonNode post(String path, Object body, Duration timeout) {
         try {
             return webClient.post()
                     .uri(path)
@@ -150,7 +181,7 @@ public class AiServiceClient {
                     .bodyValue(body)
                     .retrieve()
                     .bodyToMono(JsonNode.class)
-                    .block(longOperationTimeout);
+                    .block(timeout);
         } catch (WebClientResponseException ex) {
             throw translateUpstreamStatus(ex);
         } catch (WebClientRequestException | IllegalStateException ex) {

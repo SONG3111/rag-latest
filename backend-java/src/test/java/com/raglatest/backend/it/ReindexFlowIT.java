@@ -30,7 +30,7 @@ import org.testcontainers.utility.DockerImageName;
 
 /**
  * 真实 RabbitMQ 端到端（Testcontainers，命名 *IT 由 failsafe 跑，不进 mvnw test）：
- * 上传入队 → 声明拓扑 → 消费者调 /v1/index（WireMock 桩）→ 落库标 indexed；
+ * 上传入队 → 声明拓扑 → 消费者攒批调 /v1/index-batch（WireMock 桩）→ 落库标 indexed；
  * 毒消息经 default-requeue-rejected=false 路由进 DLQ 停车场。
  * 迁移自 Spring AMQP 官方文档的 DLQ 拓扑验证方式 + Testcontainers rabbitmq 模块示例。
  */
@@ -109,17 +109,18 @@ class ReindexFlowIT {
             }
         });
         rest = template;
+        // 批量端点：上传用例只传 1 个文件（攒批后单文件成批），响应为单元素数组
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
-                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index-batch"))
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
-                        "{\"status\":\"indexed\",\"chunk_count\":2,\"vector_count\":2,"
+                        "[{\"status\":\"indexed\",\"chunk_count\":2,\"vector_count\":2,"
                         + "\"error\":null,\"checksum\":\"x\",\"chunks\":["
                         + "{\"id\":\"p1\",\"parent_id\":null,\"level\":\"parent\",\"ordinal\":0,"
                         + "\"text\":\"表头\",\"location\":\"销售!第1行\",\"meta\":{},"
                         + "\"token_counts\":{},\"token_length\":2},"
                         + "{\"id\":\"c1\",\"parent_id\":\"p1\",\"level\":\"child\",\"ordinal\":1,"
                         + "\"text\":\"A型,1000\",\"location\":\"销售!第2行\",\"meta\":{},"
-                        + "\"token_counts\":{},\"token_length\":4}]}")));
+                        + "\"token_counts\":{},\"token_length\":4}]}]")));
     }
 
     @Test

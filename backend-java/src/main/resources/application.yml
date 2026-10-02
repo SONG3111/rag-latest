@@ -18,6 +18,8 @@ spring:
   # 索引任务队列：上传/写后重建全部经 RabbitMQ 持久化（拓扑声明见 AmqpConfig）。
   # 消费失败不 requeue（毒消息/未预期异常进 DLQ 观测，业务失败由文件状态机
   # failed + reindex 端点恢复）；并发 1 对齐原单线程 reindex executor。
+  # 注意：批量消费（攒 1s/10 条 → /v1/index-batch 跨文件合并嵌入）在 AmqpConfig
+  # 里代码装配——Boot 4 的 rabbitmq 属性已无 listener.simple.batch.* 组。
   rabbitmq:
     host: ${RABBITMQ_HOST:127.0.0.1}
     port: ${RABBITMQ_PORT:5672}

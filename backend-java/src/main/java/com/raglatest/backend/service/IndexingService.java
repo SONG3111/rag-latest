@@ -39,7 +39,8 @@ public class IndexingService {
 
     /**
      * 索引（或重建索引）单个文件，返回对外统一的 IndexingResponse。
-     * 分块落库后使该工作区的检索语料缓存失效（失败路径不失效：语料未变，60s TTL 兜底）。
+     * 本方法与 {@link #applyIndexResult} 各挂一份 evict：内部调用 applyIndexResult
+     * 是 self-invocation（不经代理），只靠一处注解会漏掉单文件路径。
      */
     @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId",
             condition = "#result != null && #result.status() == 'indexed'")
@@ -55,6 +56,20 @@ public class IndexingService {
             files.markFailed(fileId, ex.getMessage());
             return new IndexingResponse(fileId, record.relPath(), 0, 0, "failed", ex.getMessage());
         }
+        return applyIndexResult(workspaceId, fileId, result);
+    }
+
+    /**
+     * 把 ai-service 的索引结果落到本侧（单文件与批量消费者共用）：
+     * indexed 且带分块行 → 替换分块 + 标记完成；否则登记失败原因。
+     * 成功时使该工作区的检索语料缓存失效（失败路径不失效：语料未变，60s TTL 兜底）。
+     */
+    @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId",
+            condition = "#result != null && #result.status() == 'indexed'")
+    public IndexingResponse applyIndexResult(String workspaceId, String fileId, JsonNode result) {
+        String relPath = files.findInWorkspace(workspaceId, fileId)
+                .map(FileRead::relPath)
+                .orElse(fileId);
 
         String status = result.path("status").asString("failed");
         int chunkCount = result.path("chunk_count").asInt(0);
@@ -65,10 +80,10 @@ public class IndexingService {
         if ("indexed".equals(status) && rows.isArray()) {
             int inserted = chunks.replaceFileChunks(workspaceId, fileId, rows);
             files.markIndexed(fileId, chunkCount, result.path("checksum").asString(""));
-            log.info("indexed {}: {} chunks, {} vectors", record.relPath(), inserted, vectorCount);
+            log.info("indexed {}: {} chunks, {} vectors", relPath, inserted, vectorCount);
         } else {
             files.markFailed(fileId, error != null ? error : "indexing failed");
         }
-        return new IndexingResponse(fileId, record.relPath(), chunkCount, vectorCount, status, error);
+        return new IndexingResponse(fileId, relPath, chunkCount, vectorCount, status, error);
     }
 }

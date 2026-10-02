@@ -183,10 +183,10 @@ class OperationsApiTests {
 
     private void stubIndexOk() {
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
-                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
+                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index-batch"))
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
-                        "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
-                        + "\"error\":null,\"checksum\":\"x\",\"chunks\":[]}")));
+                        "[{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
+                        + "\"error\":null,\"checksum\":\"x\",\"chunks\":[]}]")));
     }
 
     private static HttpEntity<String> json(String body) {
@@ -407,7 +407,8 @@ class OperationsApiTests {
         assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status())
                 .isEqualTo("indexing");
         verify(reindexQueue).enqueue(ws, file.id(), "a.xlsx");
-        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx")));
+        consumer.onReindexTasks(java.util.List.of(
+                mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx"))));
         assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexed");
         org.mockito.Mockito.verify(reindexQueue, times(1))
                 .enqueue(ws, file.id(), "a.xlsx");
@@ -418,12 +419,13 @@ class OperationsApiTests {
         assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status())
                 .isEqualTo("indexing");
         verify(reindexQueue, times(2)).enqueue(ws, file.id(), "a.xlsx");
-        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx")));
+        consumer.onReindexTasks(java.util.List.of(
+                mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx"))));
         assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexed");
 
         aiService.verify(2, com.github.tomakehurst.wiremock.client.WireMock
                 .postRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
-                        .urlEqualTo("/v1/index"))
+                        .urlEqualTo("/v1/index-batch"))
                 .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock
                         .containing(file.id())));
     }
