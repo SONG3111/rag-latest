@@ -8,6 +8,7 @@ and every public endpoint; this process serves the internal ``/v1`` contract
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.internal import router as internal_router
 from .api.internal_chat import router as internal_chat_router
 from .config import get_settings
+from .llm.providers import build_embeddings
 from .mcp_client import McpOfficeClient, McpStartupError
 
 logging.basicConfig(
@@ -23,6 +25,18 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _warm_embeddings() -> None:
+    """后台预载嵌入模型：把首个文件 5-15s 的冷启动挪到服务启动期。
+
+    失败只告警——嵌入仍是尽力而为（BM25 兜底），首个索引请求会再试一次。
+    """
+    try:
+        build_embeddings(get_settings())
+        logger.info("embedding model warmed up")
+    except Exception:
+        logger.warning("embedding warmup failed; will retry on first index", exc_info=True)
 
 
 @asynccontextmanager
@@ -41,6 +55,8 @@ async def lifespan(app: FastAPI):
     else:
         app.state.mcp_error = None
     app.state.mcp_client = client
+
+    threading.Thread(target=_warm_embeddings, name="embedding-warmup", daemon=True).start()
 
     try:
         yield
