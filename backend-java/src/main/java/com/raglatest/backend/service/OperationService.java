@@ -2,6 +2,7 @@ package com.raglatest.backend.service;
 
 import com.raglatest.backend.api.ApiException;
 import com.raglatest.backend.internal.AiServiceClient;
+import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.OperationRepository;
 import com.raglatest.backend.store.OperationRepository.OperationRow;
@@ -11,11 +12,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
@@ -50,30 +49,25 @@ public class OperationService {
     private final FileStorage storage;
     private final BackupService backups;
     private final DocumentFileRepository files;
-    private final IndexingService indexing;
     private final ObjectMapper mapper;
-    /** 写后重建索引的后台执行器：本地嵌入耗时数秒，确认按钮不该等它。 */
-    private final ExecutorService reindexExecutor;
+    /** 写后重建索引的持久化任务队列（RabbitMQ）：进程重启不丢任务。 */
+    private final ReindexProducer reindexQueue;
 
     public OperationService(OperationRepository operations, AiServiceClient aiService,
                             FileStorage storage, BackupService backups,
-                            DocumentFileRepository files, IndexingService indexing,
-                            ObjectMapper mapper) {
+                            DocumentFileRepository files,
+                            ObjectMapper mapper, ReindexProducer reindexQueue) {
         this.operations = operations;
         this.aiService = aiService;
         this.storage = storage;
         this.backups = backups;
         this.files = files;
-        this.indexing = indexing;
         this.mapper = mapper;
-        this.reindexExecutor = Executors.newSingleThreadExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "reindex-after-write");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.reindexQueue = reindexQueue;
     }
 
     /** 备份目标文件后真正执行写操作；失败时登记原因并抛出可读错误。 */
+    @CacheEvict(cacheNames = "aiPreview", allEntries = true)
     public OperationRow apply(String workspaceId, String operationId) {
         OperationRow op = operations.find(workspaceId, operationId)
                 .orElseThrow(() -> ApiException.notFound("operation not found"));
@@ -125,9 +119,12 @@ public class OperationService {
         applyRebasePlan(planRebase(workspaceId, op));
         refreshChainedDigests(workspaceId, operationId, op.relPath(), data.path("digest"));
         backups.prune(workspaceId, 50);
-        // 重建在后台要十几秒：先同步标 indexing，前端轮询期间侧栏立刻可见状态
-        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> files.markIndexing(file.id()));
-        reindexAfterWrite(workspaceId, op.relPath());
+        // 重建在后台要十几秒：先同步标 indexing，前端轮询期间侧栏立刻可见状态；
+        // 任务投进持久化队列，进程重启不丢（消费端幂等）。
+        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> {
+            files.markIndexing(file.id());
+            reindexQueue.enqueue(workspaceId, file.id(), file.relPath());
+        });
         log.info("applied operation {} ({})", operationId, op.toolName());
         return operations.find(workspaceId, operationId).orElseThrow();
     }
@@ -143,6 +140,8 @@ public class OperationService {
         return operations.find(workspaceId, operationId).orElseThrow();
     }
 
+    /** 还原备份后文件内容同样变了，预览缓存一并失效（与 apply 对称）。 */
+    @CacheEvict(cacheNames = "aiPreview", allEntries = true)
     public OperationRow revert(String workspaceId, String operationId) {
         OperationRow op = operations.find(workspaceId, operationId)
                 .orElseThrow(() -> ApiException.notFound("operation not found"));
@@ -160,9 +159,11 @@ public class OperationService {
                     "could not restore the backup: " + ex.getMessage());
         }
         operations.markRejected(operationId, "reverted to the pre-change backup");
-        // 与 apply 同理：还原后的文件分块已过期，先标 indexing 再调度后台重建
-        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> files.markIndexing(file.id()));
-        reindexAfterWrite(workspaceId, op.relPath());
+        // 与 apply 同理：还原后的文件分块已过期，先标 indexing 再投递持久化重建任务
+        files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> {
+            files.markIndexing(file.id());
+            reindexQueue.enqueue(workspaceId, file.id(), file.relPath());
+        });
         log.info("reverted operation {}", operationId);
         return operations.find(workspaceId, operationId).orElseThrow();
     }
@@ -363,24 +364,11 @@ public class OperationService {
     }
 
     /**
-     * 文件刚被审批写入/还原，分块已过期：后台重建。仅在网络读（read_range）全部
-     * 完成后调度；失败降级为告警，下一次 reindex 端点可手动重试。
+     * 链式 digest 与索引刷新的公共逻辑入口保留在 apply/revert 内联的
+     * {@code markIndexing + enqueue} 两行里：索引重建本身已迁移到
+     * {@link com.raglatest.backend.queue.IndexingConsumer}（RabbitMQ 持久化队列），
+     * 本类不再持有后台线程。
      */
-    private void reindexAfterWrite(String workspaceId, String relPath) {
-        reindexExecutor.execute(() -> {
-            try {
-                files.findByRelPath(workspaceId, relPath)
-                        .ifPresent(file -> indexing.index(workspaceId, file.id()));
-            } catch (Exception ex) {
-                log.warn("reindex after write failed for {}: {}", relPath, ex.getMessage());
-            }
-        });
-    }
-
-    @PreDestroy
-    void stopReindexExecutor() {
-        reindexExecutor.shutdownNow();
-    }
 
     // ------------------------------------------------------------------ //
     // 工具参数改写

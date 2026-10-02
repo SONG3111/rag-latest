@@ -1,10 +1,15 @@
 package com.raglatest.backend.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.api.dto.Dtos.FileRead;
+import com.raglatest.backend.queue.IndexingConsumer;
+import com.raglatest.backend.queue.ReindexProducer;
+import com.raglatest.backend.queue.ReindexTask;
 import com.raglatest.backend.service.FileStorage;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.OperationRepository;
@@ -26,6 +31,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.client.ResponseErrorHandler;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.DefaultUriBuilderFactory;
@@ -83,6 +89,12 @@ class OperationsApiTests {
     ObjectMapper mapper;
     @Autowired
     WebServerApplicationContext serverContext;
+    @Autowired
+    IndexingConsumer consumer;
+
+    /** 队列生产端一律 mock（默认套件不连 broker）；消费端由用例手动驱动。 */
+    @MockitoBean
+    ReindexProducer reindexQueue;
 
     RestTemplate rest;
 
@@ -175,19 +187,6 @@ class OperationsApiTests {
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
                         "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
                         + "\"error\":null,\"checksum\":\"x\",\"chunks\":[]}")));
-    }
-
-    /** 后台 reindex 是异步的：轮询 WireMock 直到 /v1/index 达到期望次数（最多 10s）。 */
-    private void awaitIndexRequests(int expectedCount) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            if (aiService.findAll(com.github.tomakehurst.wiremock.client.WireMock
-                    .postRequestedFor(com.github.tomakehurst.wiremock.client.WireMock
-                            .urlEqualTo("/v1/index"))).size() >= expectedCount) {
-                return;
-            }
-            Thread.sleep(50);
-        }
     }
 
     private static HttpEntity<String> json(String body) {
@@ -391,32 +390,36 @@ class OperationsApiTests {
         assertThat(untouched.status()).isEqualTo("proposed");
     }
 
-    // ---------------- 写后后台重建索引 ---------------- //
+    // ---------------- 写后重建索引（队列投递 + 消费端落库） ---------------- //
 
     @Test
-    void applyAndRevertTriggerBackgroundReindex() throws Exception {
+    void applyAndRevertQueueReindexAndConsumerMarksIndexed() throws Exception {
         String ws = createWorkspace("写后重建");
         writeFile(ws, "a.xlsx", "ORIGINAL");
         FileRead file = files.insertPending(ws, "a.xlsx", "xlsx", 8L, "sum");
         String opId = seedOperation(ws, "a.xlsx", "digest-old");
         stubToolOk();
-        // index 响应延迟 1.5s：apply 返回时后台重建必然未完成，
-        // 从而能确定性地断言同步 markIndexing 已把文件标成 indexing
-        aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
-                .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
-                .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson(
-                        "{\"status\":\"indexed\",\"chunk_count\":0,\"vector_count\":0,"
-                        + "\"error\":null,\"checksum\":\"x\",\"chunks\":[]}").withFixedDelay(1500)));
+        stubIndexOk();
 
         rest.postForEntity(
                 "/api/workspaces/{ws}/operations/{op}/apply", null, String.class, ws, opId);
-        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexing");
-        awaitIndexRequests(1);
+        // apply 同步标 indexing + 入队（不等待索引完成，AMQP 传输由 IT 覆盖）
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status())
+                .isEqualTo("indexing");
+        verify(reindexQueue).enqueue(ws, file.id(), "a.xlsx");
+        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx")));
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexed");
+        org.mockito.Mockito.verify(reindexQueue, times(1))
+                .enqueue(ws, file.id(), "a.xlsx");
 
         rest.postForEntity(
                 "/api/workspaces/{ws}/operations/{op}/revert", null, String.class, ws, opId);
-        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexing");
-        awaitIndexRequests(2);
+        // revert 后再次标 indexing 并重新入队，消费者重建后回到 indexed
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status())
+                .isEqualTo("indexing");
+        verify(reindexQueue, times(2)).enqueue(ws, file.id(), "a.xlsx");
+        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, file.id(), "a.xlsx")));
+        assertThat(files.findByRelPath(ws, "a.xlsx").orElseThrow().status()).isEqualTo("indexed");
 
         aiService.verify(2, com.github.tomakehurst.wiremock.client.WireMock
                 .postRequestedFor(com.github.tomakehurst.wiremock.client.WireMock

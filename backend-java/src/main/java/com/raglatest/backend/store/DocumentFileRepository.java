@@ -46,6 +46,18 @@ public class DocumentFileRepository {
                 .optional();
     }
 
+    /** 启动恢复用：跨工作区列出处于给定状态的文件（FileRead 不含 workspace_id）。 */
+    public List<FileStuck> findByStatuses(String... statuses) {
+        return jdbc.sql("SELECT workspace_id, id, rel_path FROM document_files "
+                        + "WHERE status IN (:statuses)")
+                .param("statuses", List.of(statuses))
+                .query((rs, i) -> new FileStuck(
+                        rs.getString("workspace_id"), rs.getString("id"), rs.getString("rel_path")))
+                .list();
+    }
+
+    public record FileStuck(String workspaceId, String id, String relPath) {}
+
     public FileRead insertPending(String workspaceId, String relPath, String kind,
                                   long sizeBytes, String checksum) {
         String id = WorkspaceRepository.newId();

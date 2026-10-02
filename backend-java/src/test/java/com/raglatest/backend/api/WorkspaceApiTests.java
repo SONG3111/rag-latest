@@ -1,9 +1,13 @@
 package com.raglatest.backend.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.verify;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import com.raglatest.backend.queue.IndexingConsumer;
+import com.raglatest.backend.queue.ReindexProducer;
+import com.raglatest.backend.queue.ReindexTask;
 import com.raglatest.backend.store.MessageRepository;
 import com.raglatest.backend.store.TraceRepository;
 import com.raglatest.backend.store.TraceRepository.TraceNodeInput;
@@ -12,7 +16,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,10 +31,12 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.DefaultUriBuilderFactory;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * CRUD 全链路（对标 python test_api.py / test_api_files.py 的关键用例）：
@@ -81,6 +86,14 @@ class WorkspaceApiTests {
     TraceRepository traces;
     @Autowired
     WebServerApplicationContext serverContext;
+    @Autowired
+    IndexingConsumer consumer;
+    @Autowired
+    ObjectMapper mapper;
+
+    /** 队列生产端一律 mock（默认套件不连 broker）；消费端由用例手动驱动。 */
+    @MockitoBean
+    ReindexProducer reindexQueue;
 
     RestTemplate rest;
 
@@ -163,20 +176,22 @@ class WorkspaceApiTests {
     // files
     // ------------------------------------------------------------------ //
     @Test
-    void uploadStoresAndIndexesFileAndDownloadRoundTrips() {
+    void uploadQueuesIndexingTaskAndDownloadRoundTrips() {
         String ws = createWorkspace("文件");
         ResponseEntity<String> upload = upload(ws, "销售表.xlsx", XLSX_BYTES);
         assertThat(upload.getStatusCode().value()).isEqualTo(201);
         assertThat(jsonPath(upload, "$[0].rel_path")).isEqualTo("销售表.xlsx");
-        assertThat(jsonPath(upload, "$[0].status")).isEqualTo("indexed");
+        // 上传异步化：立即返回 indexing 快照（计数 0），任务由消费者完成
+        assertThat(jsonPath(upload, "$[0].status")).isEqualTo("indexing");
         assertThat(jsonPath(upload, "$[0].chunk_count").toString()).isEqualTo("0");
-
+        String fileId = jsonPath(upload, "$[0].file_id").toString();
         ResponseEntity<String> list = rest.getForEntity(
                 "/api/workspaces/{ws}/files", String.class, ws);
         assertThat(jsonPath(list, "$[0].kind")).isEqualTo("excel");
+        // markIndexing 在入队前同步落库，前端轮询期间侧栏立即可见
+        assertThat(jsonPath(list, "$[0].status")).isEqualTo("indexing");
         assertThat(jsonPath(list, "$[0].size_bytes").toString())
                 .isEqualTo(String.valueOf(XLSX_BYTES.length));
-        String fileId = jsonPath(list, "$[0].id").toString();
 
         byte[] downloaded = rest.getForObject(
                 "/api/workspaces/{ws}/files/{id}/download", byte[].class, ws, fileId);
@@ -220,12 +235,21 @@ class WorkspaceApiTests {
     }
 
     @Test
-    void reindexPersistsChunksReturnedByAiService() {
+    void reindexQueuesTaskAndConsumerPersistsChunksReturnedByAiService() {
         String ws = createWorkspace("重建索引");
         ResponseEntity<String> upload = upload(ws, "a.xlsx", XLSX_BYTES);
         String fileId = jsonPath(upload, "$[0].file_id").toString();
 
-        // 用带分块行的应答覆盖默认桩：验证 Java 把 /v1/index 返回的行原样落库。
+        ResponseEntity<String> reindex = rest.postForEntity(
+                "/api/workspaces/{ws}/files/{id}/reindex", null, String.class, ws, fileId);
+        assertThat(reindex.getStatusCode().value()).isEqualTo(200);
+        // 异步化：端点只入队并返回 indexing 快照（上传时已入队过一次，共 2 次）
+        assertThat(jsonPath(reindex, "$.status")).isEqualTo("indexing");
+        org.mockito.Mockito.verify(reindexQueue, org.mockito.Mockito.times(2))
+                .enqueue(ws, fileId, "a.xlsx");
+
+        // 用带分块行的应答覆盖默认桩：验证消费者把 /v1/index 返回的行原样落库
+        //（AMQP 传输本身由 ReindexFlowIT 覆盖，这里直驱消费方法）。
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
                 .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index"))
                 .willReturn(com.github.tomakehurst.wiremock.client.WireMock.okJson("""
@@ -237,12 +261,12 @@ class WorkspaceApiTests {
                            "text":"A型,1000","location":"销售!第2行","meta":{"kind":"excel"},
                            "token_counts":{"total":4},"token_length":4}]}
                         """)));
+        consumer.onReindexTask(mapper.writeValueAsString(new ReindexTask(ws, fileId, "a.xlsx")));
 
-        ResponseEntity<String> reindex = rest.postForEntity(
-                "/api/workspaces/{ws}/files/{id}/reindex", null, String.class, ws, fileId);
-        assertThat(reindex.getStatusCode().value()).isEqualTo(200);
-        assertThat(jsonPath(reindex, "$.status")).isEqualTo("indexed");
-        assertThat(jsonPath(reindex, "$.chunk_count").toString()).isEqualTo("1");
+        ResponseEntity<String> list = rest.getForEntity(
+                "/api/workspaces/{ws}/files", String.class, ws);
+        assertThat(jsonPath(list, "$[0].status")).isEqualTo("indexed");
+        assertThat(jsonPath(list, "$[0].chunk_count").toString()).isEqualTo("1");
 
         ResponseEntity<String> corpus = rest.getForEntity(
                 "/internal/workspaces/{ws}/retrieval-corpus", String.class, ws);

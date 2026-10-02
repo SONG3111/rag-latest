@@ -1,0 +1,85 @@
+# 注意：classpath 上同名 application.yml 只加载优先级最高的一个——本文件位于
+# test-classes，会【整体遮蔽】main/resources/application.yml 而非合并。
+# 因此这里是 main yml 的全文拷贝 + 底部三项测试覆盖；改动 main yml 时须同步此处。
+spring:
+  application:
+    name: rag-backend
+  jackson:
+    # 对外契约沿袭 Python 版的 snake_case（file_count/rel_path/created_at...）。
+    property-naming-strategy: SNAKE_CASE
+  datasource:
+    url: jdbc:sqlite:${rag.data-dir}/app.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      # 对齐 Python 版连接 pragma：WAL + busy_timeout=30s + 外键级联。
+      # 经 Hikari 的 driver-properties 传给 sqlite-jdbc，每条连接生效。
+      maximum-pool-size: 4
+      data-source-properties:
+        journal_mode: "WAL"
+        busy_timeout: "30000"
+        foreign_keys: "true"
+  # 索引任务队列：上传/写后重建全部经 RabbitMQ 持久化（拓扑声明见 AmqpConfig）。
+  # 消费失败不 requeue（毒消息/未预期异常进 DLQ 观测，业务失败由文件状态机
+  # failed + reindex 端点恢复）；并发 1 对齐原单线程 reindex executor。
+  # 【测试覆盖】dynamic=false 不向 broker 声明拓扑、listener 不启动：不连 5672，
+  # ReindexProducer 一律 @MockitoBean 替换（默认套件全 mock、零 Docker 依赖）。
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    publisher-confirm-type: correlated
+    dynamic: false
+    listener:
+      simple:
+        concurrency: 1
+        max-concurrency: 1
+        auto-startup: false
+        default-requeue-rejected: false
+  # 读路径缓存（tools/preview/health/retrieval-corpus）。
+  # 【测试覆盖】simple（进程内 ConcurrentMap）：@Cacheable/@CacheEvict 的命中与
+  # 失效语义照常验证，只是不经过 Redis；需要真 Redis/RabbitMQ 的用例见 *IT
+  # （failsafe，不进 mvnw test；ResilienceTests 类内另行覆盖为 none）。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+  cache:
+    type: simple
+
+server:
+  port: 8000
+
+rag:
+  # 本地开发从仓库根目录启动（README 命令），与 Python 版默认的 ./data 对齐；
+  # Docker 里由 compose 注入 DATA_DIR=/app/data。
+  data-dir: ${DATA_DIR:./data}
+  cors-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  ai-service:
+    base-url: ${AI_SERVICE_URL:http://127.0.0.1:8001}
+    request-timeout: 30s
+    # 与 ai-service 的 CHAT_TURN_TIMEOUT 对齐（原 Python 版 300s）。
+    chat-turn-timeout: ${CHAT_TURN_TIMEOUT:300s}
+  # 韧性容错：Java→ai-service 边界的熔断与聊天回合舱壁。
+  # 重试/并发限制走 Spring Framework 7 原生注解（@Retryable/@ConcurrencyLimit），不在此配置。
+  resilience:
+    # 读路径熔断；聊天回合用专用配置（关闭慢调用判定），见 ResilienceConfig。
+    circuit-breaker:
+      failure-rate-threshold: ${RAG_CB_FAILURE_RATE:50}
+      sliding-window-size: ${RAG_CB_WINDOW:20}
+      # 口径是“尝试数”（重试在熔断内层）：读接口一次逻辑调用最多 1+2 次，
+      # 5 约合 2 次逻辑失败即开闸（有意的快速保护）。
+      minimum-number-of-calls: ${RAG_CB_MIN_CALLS:5}
+      wait-duration-in-open-state: ${RAG_CB_OPEN_WAIT:15s}
+      permitted-number-of-calls-in-half-open-state: ${RAG_CB_HALF_OPEN_CALLS:3}
+      slow-call-duration-threshold: ${RAG_CB_SLOW_CALL:10s}
+      slow-call-rate-threshold: ${RAG_CB_SLOW_RATE:80}
+    bulkhead:
+      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:2}
+      chat-max-wait-duration: ${RAG_BULKHEAD_CHAT_WAIT:0s}
+
+logging:
+  level:
+    com.raglatest: INFO
+

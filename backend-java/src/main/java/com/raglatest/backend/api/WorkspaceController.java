@@ -5,8 +5,8 @@ import com.raglatest.backend.api.dto.Dtos.IndexingResponse;
 import com.raglatest.backend.api.dto.Dtos.WorkspaceCreate;
 import com.raglatest.backend.api.dto.Dtos.WorkspaceRead;
 import com.raglatest.backend.internal.AiServiceClient;
+import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.service.FileStorage;
-import com.raglatest.backend.service.IndexingService;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
 import java.io.IOException;
@@ -49,16 +49,16 @@ public class WorkspaceController {
     private final WorkspaceRepository workspaces;
     private final DocumentFileRepository files;
     private final FileStorage storage;
-    private final IndexingService indexing;
+    private final ReindexProducer reindexQueue;
     private final AiServiceClient aiService;
 
     public WorkspaceController(WorkspaceRepository workspaces, DocumentFileRepository files,
-                               FileStorage storage, IndexingService indexing,
+                               FileStorage storage, ReindexProducer reindexQueue,
                                AiServiceClient aiService) {
         this.workspaces = workspaces;
         this.files = files;
         this.storage = storage;
-        this.indexing = indexing;
+        this.reindexQueue = reindexQueue;
         this.aiService = aiService;
     }
 
@@ -111,8 +111,10 @@ public class WorkspaceController {
     }
 
     /**
-     * 上传即建索引：落盘登记后立即经 ai-service 的 /v1/index 解析、嵌入并落库分块。
-     * 索引失败不影响上传本身（文件已保存，状态为 failed，可经 reindex 重试）。
+     * 上传即登记建索引任务：落盘后标 indexing 并投进 RabbitMQ 持久化队列，
+     * 由 IndexingConsumer 经 ai-service /v1/index 异步完成（不再占住 HTTP 线程，
+     * 多文件的最坏等待从 N×300s 降到入队耗时）。响应保持 IndexingResponse 字段
+     * 形状（status=indexing、计数 0），前端靠文件列表轮询拿最终结果。
      */
     @PostMapping("/workspaces/{workspaceId}/files")
     public ResponseEntity<List<IndexingResponse>> uploadFiles(
@@ -136,26 +138,35 @@ public class WorkspaceController {
             FileRead record = files.insertPending(
                     workspaceId, stored.relPath(), stored.kind(),
                     stored.sizeBytes(), stored.checksum());
-            results.add(indexing.index(workspaceId, record.id()));
+            files.markIndexing(record.id());
+            reindexQueue.enqueue(workspaceId, record.id(), record.relPath());
+            results.add(new IndexingResponse(
+                    record.id(), record.relPath(), 0, 0, "indexing", null));
         }
         return ResponseEntity.status(HttpStatus.CREATED).body(results);
     }
 
-    /** 重建单个文件的索引（分块策略或模型变更后使用）。 */
+    /** 重建单个文件的索引（分块策略或模型变更后使用）；异步入队，立即返回快照。 */
     @PostMapping("/workspaces/{workspaceId}/files/{fileId}/reindex")
     public IndexingResponse reindexFile(@PathVariable String workspaceId,
                                         @PathVariable String fileId) {
         requireWorkspace(workspaceId);
-        return indexing.index(workspaceId, fileId);
+        FileRead record = files.findInWorkspace(workspaceId, fileId)
+                .orElseThrow(() -> ApiException.notFound("file not found"));
+        files.markIndexing(record.id());
+        reindexQueue.enqueue(workspaceId, record.id(), record.relPath());
+        return new IndexingResponse(record.id(), record.relPath(), 0, 0, "indexing", null);
     }
 
-    /** 重建整个工作区的索引：分块/嵌入变更后，从源文件重建（派生数据不就地修补）。 */
+    /** 重建整个工作区的索引：分块/嵌入变更后从源文件重建（派生数据不就地修补），全量入队。 */
     @PostMapping("/workspaces/{workspaceId}/reindex")
     public List<IndexingResponse> reindexWorkspace(@PathVariable String workspaceId) {
         requireWorkspace(workspaceId);
         List<IndexingResponse> results = new ArrayList<>();
         for (FileRead file : files.listByWorkspace(workspaceId)) {
-            results.add(indexing.index(workspaceId, file.id()));
+            files.markIndexing(file.id());
+            reindexQueue.enqueue(workspaceId, file.id(), file.relPath());
+            results.add(new IndexingResponse(file.id(), file.relPath(), 0, 0, "indexing", null));
         }
         return results;
     }
