@@ -14,6 +14,9 @@ import com.raglatest.backend.store.OperationRepository.OperationRow;
 import com.raglatest.backend.store.TraceRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
 import com.raglatest.backend.api.dto.Dtos.MessageRead;
+import com.raglatest.backend.support.ApiSession;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -63,6 +66,7 @@ class ChatStreamTests {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "chat_stream");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -96,11 +100,14 @@ class ChatStreamTests {
     WebServerApplicationContext serverContext;
 
     RestTemplate rest;
+    ApiSession session;
 
     @BeforeAll
     void setUpRestClient() {
         // Boot 4.1 的 resttestclient 自动配置类内省异常；自建客户端 + 永不判错。
         RestTemplate template = new RestTemplate();
+        session = new ApiSession();
+        template.getInterceptors().add(session);
         template.setUriTemplateHandler(new DefaultUriBuilderFactory(
                 "http://127.0.0.1:" + serverContext.getWebServer().getPort()));
         template.setErrorHandler(new ResponseErrorHandler() {
@@ -110,6 +117,7 @@ class ChatStreamTests {
             }
         });
         rest = template;
+        session.login(rest, TestAccounts.ADMIN_EMAIL, TestAccounts.ADMIN_PASSWORD);
     }
 
     @BeforeEach
@@ -259,8 +267,8 @@ class ChatStreamTests {
     @Test
     void persistWithoutProposalsCreatesAssistantRowAndDone() {
         String ws = createWorkspace("纯文本轮");
-        messages.insert(ws, "user", "上一轮问题", null, null);
-        messages.insert(ws, "assistant", "上一轮回答", null, null);
+        messages.insert(ws, null, "user", "上一轮问题", null, null);
+        messages.insert(ws, null, "assistant", "上一轮回答", null, null);
 
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
                 .post(com.github.tomakehurst.wiremock.client.WireMock
@@ -294,7 +302,7 @@ class ChatStreamTests {
         String ws = createWorkspace("摘要书签");
         summaries.upsert(ws, "旧摘要", 2);
         for (int i = 0; i < 3; i++) {
-            messages.insert(ws, i % 2 == 0 ? "user" : "assistant", "第" + i + "条", null, null);
+            messages.insert(ws, null, i % 2 == 0 ? "user" : "assistant", "第" + i + "条", null, null);
         }
 
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock

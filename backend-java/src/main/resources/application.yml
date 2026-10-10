@@ -1,20 +1,40 @@
 spring:
   application:
     name: rag-backend
+  # 仓库根的 .env 是 Python 侧与 Java 侧共同的配置源（ai-service 用
+  # pydantic-settings 直接读它）。INTERNAL_TOKEN 这类两侧必须逐字一致的密钥
+  # 从此只有一个来源，避免"裸跑时 Java 读不到、Python 读得到"的静默不一致。
+  # 真实环境变量（docker compose 的 environment / 系统环境变量）优先级高于
+  # 配置文件，因此容器部署下仍是 compose 说了算。
+  config:
+    import:
+      - optional:file:./.env[.properties]
+      - optional:file:../.env[.properties]
   jackson:
     # 对外契约沿袭 Python 版的 snake_case（file_count/rel_path/created_at...）。
     property-naming-strategy: SNAKE_CASE
   datasource:
-    url: jdbc:sqlite:${rag.data-dir}/app.db
-    driver-class-name: org.sqlite.JDBC
+    # Postgres 是唯一的业务库（SQLite 时代结束于多用户改造：单写者 + 文件锁
+    # 与"多人同时用"直接冲突）。DATA_DIR 从此只放文件/备份/spill/日志。
+    url: ${DATABASE_URL:jdbc:postgresql://127.0.0.1:5432/rag}
+    username: ${POSTGRES_USER:rag}
+    password: ${POSTGRES_PASSWORD:rag}
+    driver-class-name: org.postgresql.Driver
     hikari:
-      # 对齐 Python 版连接 pragma：WAL + busy_timeout=30s + 外键级联。
-      # 经 Hikari 的 driver-properties 传给 sqlite-jdbc，每条连接生效。
-      maximum-pool-size: 4
-      data-source-properties:
-        journal_mode: "WAL"
-        busy_timeout: "30000"
-        foreign_keys: "true"
+      # SQLite 的"单写者"约束消失，池可以放大到能真正并发写；上限按
+      # 「聊天回合舱壁(4) + 队列消费(1) + 读路径」估算，10 足够且不压垮单机 PG。
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+  # schema 归 Flyway 单一来源（原 db/DbInitializer 的"启动即建表"已删除）。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # 空库上线：baseline 只会掩盖"连错库"，直接禁掉。
+    baseline-on-migrate: false
+    validate-on-migrate: true
+  session:
+    jdbc:
+      # 表由 V2 迁移持有，禁止 Spring Session 自动建表（否则每次启动撞已存在的表）。
+      initialize-schema: never
   # 索引任务队列：上传/写后重建全部经 RabbitMQ 持久化（拓扑声明见 AmqpConfig）。
   # 消费失败不 requeue（毒消息/未预期异常进 DLQ 观测，业务失败由文件状态机
   # failed + reindex 端点恢复）；并发 1 对齐原单线程 reindex executor。
@@ -45,10 +65,26 @@ spring:
 
 server:
   port: 8000
+  # 部署在 nginx/网关之后：X-Forwarded-Proto 决定 Cookie 是否算 Secure，
+  # X-Forwarded-For 决定审计日志里的客户端地址。
+  forward-headers-strategy: framework
+  servlet:
+    session:
+      # 8 小时：内部工具的日常工作时段，避免开会回来被登出。
+      timeout: ${SESSION_TIMEOUT:8h}
+      cookie:
+        name: RAG_SESSION
+        http-only: true
+        # Lax 而非 None：前端与后端同源（dev 走 Vite 代理、prod 走 nginx），
+        # 同源请求本来就会带 Cookie，None 只会无谓扩大攻击面。
+        same-site: lax
+        # HTTPS 部署必须置 true；默认 false 是为了本地 http 开发。
+        secure: ${RAG_COOKIE_SECURE:false}
 
 rag:
   # 本地开发从仓库根目录启动（README 命令），与 Python 版默认的 ./data 对齐；
   # Docker 里由 compose 注入 DATA_DIR=/app/data。
+  # 注意：DATA_DIR 现在只承载 workspaces/backups/spill/logs —— 数据库已迁到 Postgres。
   data-dir: ${DATA_DIR:./data}
   cors-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   ai-service:
@@ -56,6 +92,14 @@ rag:
     request-timeout: 30s
     # 与 ai-service 的 CHAT_TURN_TIMEOUT 对齐（原 Python 版 300s）。
     chat-turn-timeout: ${CHAT_TURN_TIMEOUT:300s}
+  # Java ↔ ai-service 的内部共享密钥（X-Internal-Token）。两侧都必填且必须一致：
+  # 没配就是启动失败，绝不"未配置即放行"。
+  internal-token: ${INTERNAL_TOKEN:}
+  security:
+    # 空库首次启动时用来创建第一个管理员。未配置密码则生成随机密码并打印一次
+    # （沿用 Spring Boot 默认用户的行为）。
+    bootstrap-admin-email: ${RAG_BOOTSTRAP_ADMIN_EMAIL:}
+    bootstrap-admin-password: ${RAG_BOOTSTRAP_ADMIN_PASSWORD:}
   # 韧性容错：Java→ai-service 边界的熔断与聊天回合舱壁。
   # 重试/并发限制走 Spring Framework 7 原生注解（@Retryable/@ConcurrencyLimit），不在此配置。
   resilience:
@@ -71,8 +115,15 @@ rag:
       slow-call-duration-threshold: ${RAG_CB_SLOW_CALL:10s}
       slow-call-rate-threshold: ${RAG_CB_SLOW_RATE:80}
     bulkhead:
-      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:2}
+      # 多人共用时的全局上限（PG 已能真并发写，从 2 抬到 4）；
+      # 单人的公平性另由 per-user 限制保证（见 ChatController）。
+      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:4}
       chat-max-wait-duration: ${RAG_BULKHEAD_CHAT_WAIT:0s}
+
+mybatis-plus:
+  configuration:
+    # 表列是 snake_case（workspace_id），实体是 camelCase（workspaceId）。
+    map-underscore-to-camel-case: true
 
 logging:
   level:

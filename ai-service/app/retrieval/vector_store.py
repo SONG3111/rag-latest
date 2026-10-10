@@ -1,8 +1,18 @@
 """Qdrant-backed dense index, one collection per workspace.
 
-Qdrant runs in local (embedded) mode so the application needs no external service.
-Each workspace gets its own collection, which makes deletion a single call and keeps
-one workspace's vectors from ever appearing in another's results.
+Every workspace gets its own collection, which makes deletion a single call and keeps
+one workspace's vectors from ever appearing in another's results — the vector layer
+therefore needs no per-user filtering of its own (the same reason the Python side
+never sees a user id).
+
+Two deployment modes, chosen by ``QDRANT_URL``:
+
+* **server mode** (``QDRANT_URL`` set — the Docker Compose deployment): the index
+  lives in a Qdrant service shared by the process fleet, so restarts, scale-out and
+  concurrent maintenance scripts no longer fight over a single-process file lock.
+* **embedded mode** (blank — local development and ``pytest``): an in-process
+  ``QdrantClient(path=...)`` under ``data_dir/qdrant``. It is exclusive to one
+  process by construction, which is exactly why it is no longer used in deployment.
 """
 
 from __future__ import annotations
@@ -30,16 +40,22 @@ class VectorStoreError(RuntimeError):
 @lru_cache(maxsize=1)
 def get_client() -> QdrantClient:
     settings = get_settings()
+    if settings.qdrant_url:
+        return QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+        )
     settings.qdrant_dir.mkdir(parents=True, exist_ok=True)
     return QdrantClient(path=str(settings.qdrant_dir))
 
 
 def close_client() -> None:
-    """Release the embedded Qdrant handle.
+    """Release the Qdrant handle.
 
-    Each workspace keeps its own dense index, and all of them share a single client.
-    Closing it explicitly at shutdown avoids the interpreter-shutdown ``__del__`` path,
-    which otherwise prints a confusing ImportError traceback on exit.
+    All workspace collections share one client. Closing it explicitly at shutdown
+    avoids the interpreter-shutdown ``__del__`` path, which otherwise prints a
+    confusing ImportError traceback on exit. In server mode there is no local lock to
+    release, but closing is still the right way to drain the connection pool.
     """
     if get_client.cache_info().currsize == 0:
         return

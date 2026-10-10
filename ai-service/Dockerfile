@@ -22,6 +22,8 @@ COPY ai-service ./ai-service
 
 # The MCP server is spawned as a subprocess, so the sandbox root has to exist
 # inside the image.
+# qdrant/ 只是嵌入式模式的兜底目录（部署态用 QDRANT_URL 指向 qdrant 服务，
+# 见 docs/07）；workspaces/ 才是 MCP 沙箱根，必须存在。
 RUN mkdir -p /app/data/workspaces /app/data/qdrant
 
 ENV PYTHONPATH=/app/ai-service \

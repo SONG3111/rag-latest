@@ -9,6 +9,9 @@ import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.service.CorpusService;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
+import com.raglatest.backend.identity.UserRepository;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import com.redis.testcontainers.RedisContainer;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterAll;
@@ -58,6 +61,7 @@ class RedisCacheIT {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "redis_cache");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -83,6 +87,8 @@ class RedisCacheIT {
     CorpusService corpus;
     @Autowired
     WorkspaceRepository workspaces;
+    @Autowired
+    UserRepository users;
     @Autowired
     DocumentFileRepository files;
     @Autowired
@@ -121,7 +127,7 @@ class RedisCacheIT {
 
     @Test
     void corpusCacheLandsInRedisWithKeyPrefix() {
-        var workspace = workspaces.create("Redis 语料", null);
+        var workspace = workspaces.create("Redis 语料", null, TestAccounts.ownerId(users));
         String ws = workspace.id();
         files.insertPending(ws, "a.xlsx", "xlsx", 8L, "sum");
 

@@ -6,6 +6,9 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.internal.AiServiceClient;
 import com.raglatest.backend.queue.ReindexProducer;
+import com.raglatest.backend.identity.UserRepository;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
 import java.nio.file.Path;
@@ -51,6 +54,7 @@ class CacheEvictTests {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "cache_evict");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -78,13 +82,15 @@ class CacheEvictTests {
     DocumentFileRepository files;
     @Autowired
     JdbcTemplate jdbc;
+    @Autowired
+    UserRepository users;
 
     @MockitoBean
     ReindexProducer reindexQueue;
 
     /** 建工作区 + 登记文件 + 插一行 chunk，返回 workspace id。 */
     private String seedWorkspaceWithChunk() {
-        var workspace = workspaces.create("缓存", null);
+        var workspace = workspaces.create("缓存", null, TestAccounts.ownerId(users));
         String ws = workspace.id();
         var file = files.insertPending(ws, "a.xlsx", "xlsx", 8L, "sum");
         Timestamp now = Timestamp.from(java.time.Instant.now());

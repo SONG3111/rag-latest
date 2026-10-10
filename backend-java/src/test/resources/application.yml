@@ -1,6 +1,13 @@
 # 注意：classpath 上同名 application.yml 只加载优先级最高的一个——本文件位于
 # test-classes，会【整体遮蔽】main/resources/application.yml 而非合并。
 # 因此这里是 main yml 的全文拷贝 + 底部三项测试覆盖；改动 main yml 时须同步此处。
+#
+# 【多用户改造后的主要变化】
+#   * 数据源改为 Postgres，URL/账号由每个测试类的 @DynamicPropertySource 注入
+#     （EmbeddedPostgresSupport，每类一个库）；
+#   * 测试里不使用 .env（main yml 的 config.import 在此被整体遮蔽），
+#     INTERNAL_TOKEN 与引导管理员都取固定值；
+#   * 引导管理员密码固定，测试直接以它登录（幂等：库空才建号）。
 spring:
   application:
     name: rag-backend
@@ -8,16 +15,21 @@ spring:
     # 对外契约沿袭 Python 版的 snake_case（file_count/rel_path/created_at...）。
     property-naming-strategy: SNAKE_CASE
   datasource:
-    url: jdbc:sqlite:${rag.data-dir}/app.db
-    driver-class-name: org.sqlite.JDBC
+    # 占位值：真正的 URL 由 EmbeddedPostgresSupport.register(...) 每个测试类注入。
+    url: jdbc:postgresql://127.0.0.1:5432/unset
+    username: postgres
+    password: ""
+    driver-class-name: org.postgresql.Driver
     hikari:
-      # 对齐 Python 版连接 pragma：WAL + busy_timeout=30s + 外键级联。
-      # 经 Hikari 的 driver-properties 传给 sqlite-jdbc，每条连接生效。
-      maximum-pool-size: 4
-      data-source-properties:
-        journal_mode: "WAL"
-        busy_timeout: "30000"
-        foreign_keys: "true"
+      maximum-pool-size: 6
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+  session:
+    jdbc:
+      initialize-schema: never
   # 索引任务队列：上传/写后重建全部经 RabbitMQ 持久化（拓扑声明见 AmqpConfig）。
   # 消费失败不 requeue（毒消息/未预期异常进 DLQ 观测，业务失败由文件状态机
   # failed + reindex 端点恢复）；并发 1 对齐原单线程 reindex executor。
@@ -50,10 +62,20 @@ spring:
 
 server:
   port: 8000
+  forward-headers-strategy: framework
+  servlet:
+    session:
+      timeout: 8h
+      cookie:
+        name: RAG_SESSION
+        http-only: true
+        same-site: lax
+        # 测试走 http://127.0.0.1:随机端口，Secure Cookie 会被浏览器/客户端丢掉。
+        secure: false
 
 rag:
   # 本地开发从仓库根目录启动（README 命令），与 Python 版默认的 ./data 对齐；
-  # Docker 里由 compose 注入 DATA_DIR=/app/data。
+  # 测试里由各测试类的 @DynamicPropertySource 指向临时目录。
   data-dir: ${DATA_DIR:./data}
   cors-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   ai-service:
@@ -61,6 +83,11 @@ rag:
     request-timeout: 30s
     # 与 ai-service 的 CHAT_TURN_TIMEOUT 对齐（原 Python 版 300s）。
     chat-turn-timeout: ${CHAT_TURN_TIMEOUT:300s}
+  # 固定值：测试不读 .env，两侧（Java/WireMock）用同一个常量。
+  internal-token: test-internal-token
+  security:
+    bootstrap-admin-email: admin@test.local
+    bootstrap-admin-password: test-admin-password
   # 韧性容错：Java→ai-service 边界的熔断与聊天回合舱壁。
   # 重试/并发限制走 Spring Framework 7 原生注解（@Retryable/@ConcurrencyLimit），不在此配置。
   resilience:
@@ -76,8 +103,12 @@ rag:
       slow-call-duration-threshold: ${RAG_CB_SLOW_CALL:10s}
       slow-call-rate-threshold: ${RAG_CB_SLOW_RATE:80}
     bulkhead:
-      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:2}
+      chat-max-concurrent-calls: ${RAG_BULKHEAD_CHAT_MAX:4}
       chat-max-wait-duration: ${RAG_BULKHEAD_CHAT_WAIT:0s}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
 
 logging:
   level:

@@ -2,10 +2,12 @@ package com.raglatest.backend.store;
 
 import com.raglatest.backend.api.dto.Dtos.TraceNodeRead;
 import com.raglatest.backend.api.dto.Dtos.TraceRunRead;
-import java.sql.Timestamp;
+import com.raglatest.backend.store.mapper.TraceMapper;
+import com.raglatest.backend.store.mapper.TraceMapper.NodeRow;
+import com.raglatest.backend.store.mapper.TraceMapper.RunRow;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -18,81 +20,62 @@ import tools.jackson.databind.ObjectMapper;
 @Repository
 public class TraceRepository {
 
-    private final JdbcClient jdbc;
-    private final ObjectMapper mapper;
+    private final TraceMapper mapper;
+    private final ObjectMapper json;
 
-    public TraceRepository(JdbcClient jdbc, ObjectMapper mapper) {
-        this.jdbc = jdbc;
+    public TraceRepository(TraceMapper mapper, ObjectMapper json) {
         this.mapper = mapper;
+        this.json = json;
     }
 
     public record TraceNodeInput(String node, long durationMs, JsonNode input,
                                  JsonNode output, String error) {}
 
     public List<TraceRunRead> listRuns(String workspaceId, int limit) {
-        return jdbc.sql("""
-                        SELECT run_id,
-                               MIN(created_at) AS started_at,
-                               COUNT(*) AS node_count,
-                               SUM(duration_ms) AS total_ms,
-                               SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS error_count
-                        FROM run_traces WHERE workspace_id = :ws
-                        GROUP BY run_id
-                        ORDER BY started_at DESC
-                        LIMIT :limit
-                        """)
-                .param("ws", workspaceId)
-                .param("limit", limit)
-                .query((rs, i) -> new TraceRunRead(
-                        rs.getString("run_id"),
-                        WorkspaceRepository.toInstant(rs.getTimestamp("started_at")),
-                        rs.getInt("node_count"),
-                        rs.getLong("total_ms"),
-                        rs.getInt("error_count") > 0))
-                .list();
+        return mapper.listRuns(workspaceId, limit).stream()
+                .map(TraceRepository::toRunRead)
+                .toList();
     }
 
     public Optional<List<TraceNodeRead>> runDetail(String workspaceId, String runId) {
-        List<TraceNodeRead> nodes = jdbc.sql("""
-                        SELECT node, duration_ms, input, output, error
-                        FROM run_traces WHERE workspace_id = :ws AND run_id = :run
-                        ORDER BY rowid ASC
-                        """)
-                .param("ws", workspaceId)
-                .param("run", runId)
-                .query((rs, i) -> new TraceNodeRead(
-                        rs.getString("node"),
-                        rs.getLong("duration_ms"),
-                        parseJson(rs.getString("input")),
-                        parseJson(rs.getString("output")),
-                        rs.getString("error")))
-                .list();
+        List<TraceNodeRead> nodes = mapper.runDetail(workspaceId, runId).stream()
+                .map(this::toNodeRead)
+                .toList();
         return nodes.isEmpty() ? Optional.empty() : Optional.of(nodes);
     }
 
-    /** M2 聊天链路落库用；先供测试直接铺 trace 数据。 */
+    /** 聊天链路落库用；也供测试直接铺 trace 数据。 */
     public void insertNode(String workspaceId, String runId, TraceNodeInput node) {
-        Timestamp now = Timestamp.from(java.time.Instant.now());
-        jdbc.sql("""
-                INSERT INTO run_traces (id, workspace_id, run_id, node, duration_ms, input, output, error, created_at)
-                VALUES (:id, :ws, :run, :node, :durationMs, :input, :output, :error, :created)
-                """)
-                .param("id", WorkspaceRepository.newId())
-                .param("ws", workspaceId)
-                .param("run", runId)
-                .param("node", node.node())
-                .param("durationMs", node.durationMs())
-                .param("input", mapper.writeValueAsString(node.input()))
-                .param("output", mapper.writeValueAsString(node.output()))
-                .param("error", node.error())
-                .param("created", now)
-                .update();
+        mapper.insertNode(
+                WorkspaceRepository.newId(), workspaceId, runId, node.node(), node.durationMs(),
+                json.writeValueAsString(node.input()),
+                json.writeValueAsString(node.output()),
+                node.error(),
+                OffsetDateTime.now());
+    }
+
+    private static TraceRunRead toRunRead(RunRow row) {
+        return new TraceRunRead(
+                row.runId(),
+                WorkspaceRepository.toInstant(row.startedAt()),
+                row.nodeCount(),
+                row.totalMs(),
+                row.errorCount() > 0);
+    }
+
+    private TraceNodeRead toNodeRead(NodeRow row) {
+        return new TraceNodeRead(
+                row.node(),
+                row.durationMs(),
+                parseJson(row.input()),
+                parseJson(row.output()),
+                row.error());
     }
 
     private JsonNode parseJson(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
         }
-        return mapper.readTree(raw);
+        return json.readTree(raw);
     }
 }

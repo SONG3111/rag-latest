@@ -1,23 +1,26 @@
 package com.raglatest.backend.store;
 
 import com.raglatest.backend.api.dto.Dtos.MessageRead;
-import java.sql.Timestamp;
+import com.raglatest.backend.store.mapper.MessageMapper;
+import com.raglatest.backend.store.mapper.MessageMapper.MessageRow;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+/** 会话消息：历史窗、书签算术与写入（含"谁说的"这一多用户审计字段）。 */
 @Repository
 public class MessageRepository {
 
-    private final JdbcClient jdbc;
-    private final ObjectMapper mapper;
+    private final MessageMapper mapper;
+    private final ObjectMapper json;
 
-    public MessageRepository(JdbcClient jdbc, ObjectMapper mapper) {
-        this.jdbc = jdbc;
+    public MessageRepository(MessageMapper mapper, ObjectMapper json) {
         this.mapper = mapper;
+        this.json = json;
     }
 
     /**
@@ -25,89 +28,61 @@ public class MessageRepository {
      * 最近几轮挤出响应窗口）。citations/tool_calls 为 JSON 文本列，读出即解析。
      */
     public List<MessageRead> recent(String workspaceId, int limit) {
-        List<MessageRead> newestFirst = jdbc.sql("""
-                        SELECT id, role, content, tool_calls, citations, feedback, created_at
-                        FROM messages WHERE workspace_id = :ws
-                        ORDER BY created_at DESC, id DESC LIMIT :limit
-                        """)
-                .param("ws", workspaceId)
-                .param("limit", limit)
-                .query(this::mapRow)
-                .list();
+        List<MessageRead> newestFirst = mapper.recentNewestFirst(workspaceId, limit).stream()
+                .map(this::toRead)
+                .toList();
         return newestFirst.reversed();
     }
 
     /** 全量消息数：covered 书签算术用（超过请求封顶时与 messages 列表长度不一致）。 */
     public long countAll(String workspaceId) {
-        return jdbc.sql("SELECT COUNT(*) FROM messages WHERE workspace_id = :ws")
-                .param("ws", workspaceId)
-                .query(Long.class)
-                .single();
+        return mapper.countAll(workspaceId);
     }
 
     /** 最新一条消息的时间（stale files 的 cutoff；无消息时为 null）。 */
-    public java.time.Instant latestCreatedAt(String workspaceId) {
-        Timestamp latest = jdbc.sql(
-                        "SELECT MAX(created_at) FROM messages WHERE workspace_id = :ws")
-                .param("ws", workspaceId)
-                .query((rs, i) -> rs.getTimestamp(1))
-                .optional()
-                .orElse(null);
+    public Instant latestCreatedAt(String workspaceId) {
+        OffsetDateTime latest = mapper.latestCreatedAt(workspaceId);
         return latest == null ? null : latest.toInstant();
     }
 
     public Optional<MessageRead> findInWorkspace(String workspaceId, String messageId) {
-        return jdbc.sql("""
-                        SELECT id, role, content, tool_calls, citations, feedback, created_at
-                        FROM messages WHERE id = :id AND workspace_id = :ws
-                        """)
-                .param("id", messageId)
-                .param("ws", workspaceId)
-                .query(this::mapRow)
-                .optional();
+        return Optional.ofNullable(mapper.findInWorkspace(workspaceId, messageId))
+                .map(this::toRead);
     }
 
-    public String insert(String workspaceId, String role, String content,
+    /**
+     * 落一条消息。{@code userId} 只对 user 角色行非空——assistant 行与系统注入行
+     * 没有"谁说的"，落 NULL；外键是 ON DELETE SET NULL，删号不会连坐历史。
+     */
+    public String insert(String workspaceId, String userId, String role, String content,
                          JsonNode toolCalls, JsonNode citations) {
         String id = WorkspaceRepository.newId();
-        Timestamp now = Timestamp.from(java.time.Instant.now());
-        jdbc.sql("""
-                INSERT INTO messages (id, workspace_id, role, content, tool_calls, citations, created_at)
-                VALUES (:id, :ws, :role, :content, :toolCalls, :citations, :created)
-                """)
-                .param("id", id)
-                .param("ws", workspaceId)
-                .param("role", role)
-                .param("content", content)
-                .param("toolCalls", toolCalls == null ? null : mapper.writeValueAsString(toolCalls))
-                .param("citations", citations == null ? null : mapper.writeValueAsString(citations))
-                .param("created", now)
-                .update();
+        mapper.insert(id, workspaceId, userId, role, content,
+                toolCalls == null ? null : json.writeValueAsString(toolCalls),
+                citations == null ? null : json.writeValueAsString(citations),
+                OffsetDateTime.now());
         return id;
     }
 
     public void updateFeedback(String messageId, String feedback) {
-        jdbc.sql("UPDATE messages SET feedback = :feedback WHERE id = :id")
-                .param("feedback", feedback)
-                .param("id", messageId)
-                .update();
+        mapper.updateFeedback(messageId, feedback);
     }
 
-    private MessageRead mapRow(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
+    private MessageRead toRead(MessageRow row) {
         return new MessageRead(
-                rs.getString("id"),
-                rs.getString("role"),
-                rs.getString("content"),
-                parseJson(rs.getString("citations")),
-                parseJson(rs.getString("tool_calls")),
-                rs.getString("feedback"),
-                WorkspaceRepository.toInstant(rs.getTimestamp("created_at")));
+                row.id(),
+                row.role(),
+                row.content(),
+                parseJson(row.citations()),
+                parseJson(row.toolCalls()),
+                row.feedback(),
+                WorkspaceRepository.toInstant(row.createdAt()));
     }
 
     private JsonNode parseJson(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
         }
-        return mapper.readTree(raw);
+        return json.readTree(raw);
     }
 }

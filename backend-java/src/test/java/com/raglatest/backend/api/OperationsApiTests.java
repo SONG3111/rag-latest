@@ -15,6 +15,9 @@ import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.OperationRepository;
 import com.raglatest.backend.store.OperationRepository.OperationRow;
 import com.raglatest.backend.store.WorkspaceRepository;
+import com.raglatest.backend.support.ApiSession;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterAll;
@@ -64,6 +67,7 @@ class OperationsApiTests {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "operations_api");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -91,16 +95,23 @@ class OperationsApiTests {
     WebServerApplicationContext serverContext;
     @Autowired
     IndexingConsumer consumer;
+    @Autowired
+    com.raglatest.backend.identity.UserRepository userRepository;
+    @Autowired
+    org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     /** 队列生产端一律 mock（默认套件不连 broker）；消费端由用例手动驱动。 */
     @MockitoBean
     ReindexProducer reindexQueue;
 
     RestTemplate rest;
+    ApiSession session;
 
     @BeforeAll
     void setUpRestClient() {
         RestTemplate template = new RestTemplate();
+        session = new ApiSession();
+        template.getInterceptors().add(session);
         template.setUriTemplateHandler(new DefaultUriBuilderFactory(
                 "http://127.0.0.1:" + serverContext.getWebServer().getPort()));
         template.setErrorHandler(new ResponseErrorHandler() {
@@ -110,6 +121,7 @@ class OperationsApiTests {
             }
         });
         rest = template;
+        session.login(rest, TestAccounts.ADMIN_EMAIL, TestAccounts.ADMIN_PASSWORD);
     }
 
     @BeforeEach
@@ -143,13 +155,13 @@ class OperationsApiTests {
         }
         ArrayNode diff = mapper.createArrayNode();
         diff.addObject().put("cell", "A2").put("before", 1).put("after", 2);
-        return operations.insertProposed(workspaceId, "update_cells", relPath, args, diff, "改 A2");
+        return operations.insertProposed(workspaceId, null, "update_cells", relPath, args, diff, "改 A2");
     }
 
     /** 直接落一条任意工具的 proposed 提案（rebase/自动驳回场景的种子）。 */
     private String seedOperation(String workspaceId, String relPath, String tool,
                                  String argsJson, String summary) {
-        return operations.insertProposed(workspaceId, tool, relPath,
+        return operations.insertProposed(workspaceId, null, tool, relPath,
                 (ObjectNode) mapper.readTree(argsJson), null, summary);
     }
 
@@ -197,6 +209,36 @@ class OperationsApiTests {
 
     private static Object jsonPath(ResponseEntity<String> response, String path) {
         return com.jayway.jsonpath.JsonPath.read(response.getBody(), path);
+    }
+
+    /**
+     * 审批闭环的问责链必须落在库里：谁提的、谁批的。对外契约（OperationRead）不含
+     * 这两列，所以这里直接查库——多用户下"这个改动是谁批准的"必须答得出来。
+     */
+    @Test
+    void applyRecordsProposerAndApprover() throws Exception {
+        String ws = createWorkspace("审批问责");
+        writeFile(ws, "a.xlsx", "ORIGINAL");
+        String approver = TestAccounts.ownerId(userRepository);
+
+        ObjectNode args = mapper.createObjectNode();
+        args.put("path", "a.xlsx");
+        args.put("sheet_name", "S");
+        args.putArray("updates").addObject().put("cell", "A2").put("value", 2);
+        String opId = operations.insertProposed(ws, approver, "update_cells", "a.xlsx",
+                args, mapper.createArrayNode(), "改 A2");
+        stubToolOk();
+
+        ResponseEntity<String> response = rest.postForEntity(
+                "/api/workspaces/{ws}/operations/{op}/apply", null, String.class, ws, opId);
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+
+        String proposer = jdbc.queryForObject(
+                "SELECT proposed_by_user_id FROM operations WHERE id = ?", String.class, opId);
+        String resolver = jdbc.queryForObject(
+                "SELECT resolved_by_user_id FROM operations WHERE id = ?", String.class, opId);
+        assertThat(proposer).isEqualTo(approver);
+        assertThat(resolver).isEqualTo(approver);
     }
 
     @Test

@@ -9,12 +9,15 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.config.RagProperties;
 import com.raglatest.backend.config.ResilienceConfig;
 import com.raglatest.backend.internal.AiServiceClient;
+import com.raglatest.backend.identity.UserRepository;
+import com.raglatest.backend.security.InternalToken;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -28,7 +31,10 @@ import static org.mockito.Mockito.when;
  * 契约与原 Python 版保持一致，前端与 docker healthcheck 依赖它。
  */
 @WebMvcTest(HealthController.class)
-@Import({AiServiceClient.class, ResilienceConfig.class})
+// InternalToken 是 AiServiceClient 的构造依赖（内部调用的凭据头）。
+@Import({AiServiceClient.class, ResilienceConfig.class, InternalToken.class})
+// 切片只测 /health 的聚合语义，不测鉴权（鉴权由 ApiAuthorizationTests 专门覆盖）。
+@AutoConfigureMockMvc(addFilters = false)
 @EnableConfigurationProperties(RagProperties.class)
 class HealthControllerUpTests {
 
@@ -38,6 +44,14 @@ class HealthControllerUpTests {
     /** 切片上下文没有 Redis/RabbitMQ 连接工厂：基础设施探针以 mock 提供。 */
     @MockitoBean
     InfraHealth infra;
+
+    /**
+     * AccountFreshnessFilter 是 Filter 类型的 @Component，会被 @WebMvcTest 的切片
+     * 一起扫进来（@WebMvcTest 包含 Filter 组件），它依赖 UserRepository —— 切片
+     * 里没有数据层，故以 mock 提供；本类不测鉴权。
+     */
+    @MockitoBean
+    UserRepository users;
 
     @DynamicPropertySource
     static void aiServiceUrl(DynamicPropertyRegistry registry) {

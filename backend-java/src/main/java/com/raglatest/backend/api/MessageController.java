@@ -4,9 +4,10 @@ import com.raglatest.backend.api.dto.Dtos.MessageFeedback;
 import com.raglatest.backend.api.dto.Dtos.MessageRead;
 import com.raglatest.backend.api.dto.Dtos.TraceRunDetail;
 import com.raglatest.backend.api.dto.Dtos.TraceRunRead;
+import com.raglatest.backend.security.CurrentUser;
+import com.raglatest.backend.service.WorkspaceAccessGuard;
 import com.raglatest.backend.store.MessageRepository;
 import com.raglatest.backend.store.TraceRepository;
-import com.raglatest.backend.store.WorkspaceRepository;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -22,13 +23,13 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api")
 public class MessageController {
 
-    private final WorkspaceRepository workspaces;
+    private final WorkspaceAccessGuard access;
     private final MessageRepository messages;
     private final TraceRepository traces;
 
-    public MessageController(WorkspaceRepository workspaces, MessageRepository messages,
+    public MessageController(WorkspaceAccessGuard access, MessageRepository messages,
                              TraceRepository traces) {
-        this.workspaces = workspaces;
+        this.access = access;
         this.messages = messages;
         this.traces = traces;
     }
@@ -37,7 +38,7 @@ public class MessageController {
     public List<MessageRead> listMessages(
             @PathVariable String workspaceId,
             @RequestParam(defaultValue = "200") int limit) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         return messages.recent(workspaceId, limit);
     }
 
@@ -46,7 +47,7 @@ public class MessageController {
             @PathVariable String workspaceId,
             @PathVariable String messageId,
             @Valid @RequestBody MessageFeedback payload) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         messages.findInWorkspace(workspaceId, messageId)
                 .orElseThrow(() -> ApiException.notFound("message not found"));
         messages.updateFeedback(messageId,
@@ -58,21 +59,17 @@ public class MessageController {
     public List<TraceRunRead> listTraceRuns(
             @PathVariable String workspaceId,
             @RequestParam(defaultValue = "20") int limit) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         return traces.listRuns(workspaceId, limit);
     }
 
     @GetMapping("/workspaces/{workspaceId}/traces/{runId}")
     public TraceRunDetail getTraceRun(@PathVariable String workspaceId, @PathVariable String runId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         List<com.raglatest.backend.api.dto.Dtos.TraceNodeRead> nodes =
                 traces.runDetail(workspaceId, runId)
                         .orElseThrow(() -> ApiException.notFound("trace run not found"));
         return new TraceRunDetail(runId, nodes);
     }
 
-    private void requireWorkspace(String workspaceId) {
-        workspaces.find(workspaceId)
-                .orElseThrow(() -> ApiException.notFound("workspace not found"));
-    }
 }

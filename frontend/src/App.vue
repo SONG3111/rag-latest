@@ -1,30 +1,12 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { message } from 'ant-design-vue'
-import ChatPanel from './components/ChatPanel.vue'
-import InspectorPanel from './components/InspectorPanel.vue'
-import WorkspaceSidebar from './components/WorkspaceSidebar.vue'
-import { useWorkspaceStore } from './stores/workspace'
+// 应用外壳只剩路由出口：登录页、对话壳与账号管理页由 router 决定渲染谁。
+// 鉴权与数据加载都下沉到各自视图（登录页不碰工作区数据，管理员页不碰对话状态）。
+import { useAuthStore } from './stores/auth'
 
-const store = useWorkspaceStore()
-
-onMounted(async () => {
-  await store.refreshHealth()
-  if (store.health && !store.health.mcp_started) {
-    message.warning('文档工具服务未启动，文件相关功能暂不可用')
-  }
-  try {
-    await store.loadWorkspaces()
-  } catch (error) {
-    message.error(`加载工作区失败：${error instanceof Error ? error.message : String(error)}`)
-  }
-})
+// 注册"会话失效"回调：任何一个接口返回 401，都由 auth store 统一清状态并跳登录页。
+useAuthStore().registerUnauthorizedHandler()
 </script>
 
 <template>
-  <div class="app-shell">
-    <WorkspaceSidebar />
-    <ChatPanel />
-    <InspectorPanel />
-  </div>
+  <router-view />
 </template>

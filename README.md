@@ -37,7 +37,7 @@
                     └───────────┬──────────────────┘    └──────┬─────────────────┘
                                 │                              │
                     ┌───────────▼──────────┐        ┌──────────▼──────────────┐
-                    │ Qdrant(local) + SQLite│        │ 工作区目录（沙箱）       │
+                    │ Qdrant + PostgreSQL  │        │ 工作区目录（沙箱）       │
                     └──────────────────────┘        └─────────────────────────┘
 ```
 
@@ -119,15 +119,16 @@ LangChain 并不会透出（`additional_kwargs` 为空），无法显示给用�
 | 层 | 选型 | 备注 |
 |---|---|---|
 | 前端 | Vue 3 + Vite + TypeScript + Pinia + Ant Design Vue | SSE 流式渲染工具调用过程 |
-| 业务后端 | Java 21 + Spring Boot（backend-java/） | 对外 8000，REST/SSE 网关 + SQLite 独占 |
+| 业务后端 | Java 21 + Spring Boot（backend-java/） | 对外 8000，REST/SSE 网关 + 会话与鉴权 |
 | AI 服务 | Python 3.11/3.12 + FastAPI（ai-service/，无状态） | 内网 8001，SSE 用 `sse-starlette` |
 | Agent | LangGraph（单 Agent + 工具循环） | 迭代次数有上限，防止死循环 |
 | LLM | 百炼 `qwen-plus`（OpenAI 兼容模式） | 改 `LLM_MODEL` 即可换模型 |
 | Embedding | **本地** `BAAI/bge-m3`（1024 维） | 权重在本地，建索引不出网 |
 | Reranker | **本地** `BAAI/bge-reranker-v2-m3` | 交叉编码器，本地推理 |
 | 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 22 个工具（7 只读 + 15 写入需审批） |
-| 向量库 | Qdrant local（嵌入式） | 每个工作区一个 collection |
-| 关系库 | SQLite（仅 backend-java 打开） | 工作区 / 文件 / 消息 / 操作审计 |
+| 向量库 | Qdrant（服务端；本机开发可退回嵌入式） | 每个工作区一个 collection |
+| 关系库 | PostgreSQL + Flyway + MyBatis-Plus | 账号 / 工作区 / 文件 / 消息 / 操作审计 |
+| 认证 | Spring Security + 服务端会话（落 Postgres） | 账号密码登录，工作区按 owner 隔离 |
 
 > LangGraph 只负责编排，不自带任何模型。LLM、embedding、rerank 分别由
 > `app/llm/providers.py` 的工厂函数产出，换供应商只改配置。
@@ -181,13 +182,20 @@ huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir C:/code/agent/rag/m
 ### 3. 启动后端（中间件 + AI 服务 + Java 业务后端）
 
 后端拆成两个进程：`ai-service/`（FastAPI，AI 能力 + MCP 子进程，端口 8001，仅内网）
-和 `backend-java/`（Spring Boot，业务端点与 SQLite，端口 8000，唯一对前端）。
-Java 后端还依赖两个基础中间件：**RabbitMQ**（索引任务队列：上传/写后重建全部异步持久化）
-与 **Redis**（tools/preview/health/检索语料的读缓存），本地启动前先起容器：
+和 `backend-java/`（Spring Boot，业务端点 + Postgres，端口 8000，唯一对前端）。
+Java 后端依赖三个基础中间件：**PostgreSQL**（业务库与会话）、**RabbitMQ**（索引任务队列：
+上传/写后重建全部异步持久化）、**Redis**（tools/preview/health/检索语料的读缓存）。
+本机裸跑时用容器起它们（`docker compose up -d postgres rabbitmq redis`）；
+若还要跑部署态的向量库，再加 `qdrant`。**首次启动前先配 `.env`**：
 
 ```bash
-# 一次性：起 RabbitMQ（含管理界面 http://127.0.0.1:15672）与 Redis
-docker compose up -d rabbitmq redis
+cp .env.example .env
+# 必填：INTERNAL_TOKEN（Java ↔ ai-service 共享密钥；Java 侧未配置会拒绝启动）
+# 建议一并设置：RAG_BOOTSTRAP_ADMIN_EMAIL / RAG_BOOTSTRAP_ADMIN_PASSWORD（首个管理员）
+# 不设密码则随机生成并打印一次日志。数据库连接默认 rag/rag@127.0.0.1:5432。
+
+# 一次性：起 Postgres（业务库与会话）、RabbitMQ（管理界面 127.0.0.1:15672）与 Redis
+docker compose up -d postgres rabbitmq redis
 ```
 
 ```bash
@@ -208,7 +216,11 @@ cd backend-java && DATA_DIR=../data ./mvnw spring-boot:run   # Windows 用 mvnw.
 ```
 
 对外端点是 Java 后端 `http://127.0.0.1:8000`（健康检查 `/health`，会聚合
-ai-service 状态）；AI 服务在 `http://127.0.0.1:8001` 只接受 Java 后端的内部调用。
+ai-service 状态）；AI 服务在 `http://127.0.0.1:8001` 只接受 Java 后端的内部调用
+（`X-Internal-Token` 头，取值见 `.env`）。
+
+> 首次启动会用 `.env` 里的邮箱/密码创建**第一个管理员**（空库才建），
+> 之后所有账号都由管理员在「账号管理」页创建——没有自助注册。
 
 ### 4. 启动前端
 
@@ -218,7 +230,8 @@ npm install
 npm run dev
 ```
 
-打开 `http://localhost:5173`。前端通过 Vite 代理转发 `/api`，浏览器只面对一个源，SSE 不需要额外协商 CORS。
+打开 `http://localhost:5173`，用上面创建的账号登录。前端通过 Vite 代理转发 `/api`，
+浏览器只面对一个源，SSE 与 HttpOnly 会话 Cookie 都不需要额外协商 CORS。
 
 ### 5. 用 Docker 启动（可选）
 
@@ -266,9 +279,13 @@ python scripts/make_demo_data.py
 │   │   ├── llm/              # 模型 provider + 熔断/回退
 │   │   └── retrieval/        # 分块 / BM25 / 向量库 / RRF 管线
 │   └── tests/
-├── backend-java/             # Java 业务后端（对外 8000）：REST/SSE 网关 + SQLite 独占
-│   ├── src/main/java/…/      # 工作区/文件/消息/提案状态机、迁移、SSE 中继
-│   └── src/test/java/…/      # JUnit5 + WireMock（桩掉 ai-service，不调模型）
+├── backend-java/             # Java 业务后端（对外 8000）：REST/SSE 网关 + Postgres + 鉴权
+│   ├── src/main/java/…/      # 账号/鉴权、工作区/文件/消息/提案状态机、SSE 中继
+│   │   ├── security/         # Spring Security 装配、会话、CSRF、内部令牌
+│   │   ├── identity/         # 账号与角色（平台两级：admin / member）
+│   │   └── store/            # MyBatis-Plus mapper + 领域仓储
+│   ├── src/main/resources/db/migration/   # Flyway 版本化迁移（V1 基线 / V2 会话表）
+│   └── src/test/java/…/      # JUnit5 + WireMock + 嵌入式 Postgres（不调模型、不依赖 Docker）
 ├── frontend/src/             # Vue 三栏界面
 └── scripts/                  # 演示数据、检索评测、冒烟脚本
 ```

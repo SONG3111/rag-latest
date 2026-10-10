@@ -11,10 +11,20 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 @ConfigurationProperties(prefix = "rag")
 public record RagProperties(
-        /** 运行时数据根目录（app.db、workspaces/、backups/ 都在它下面）。 */
+        /**
+         * 运行时数据根目录：workspaces/（用户文件沙箱）、backups/（写前备份）、
+         * spill/（工具结果溢写）、logs/ 都在它下面。关系数据自多用户改造起
+         * 不在这个目录里，而是 Postgres（见 spring.datasource.url）。
+         */
         @DefaultValue("./data") String dataDir,
         @DefaultValue AiService aiService,
         @DefaultValue Resilience resilience,
+        /**
+         * Java ↔ ai-service 内部调用的共享密钥（X-Internal-Token）。
+         * 空值不是"关闭鉴权"而是启动失败，见 {@code InternalToken}.
+         */
+        @DefaultValue("") String internalToken,
+        @DefaultValue Security security,
         /** 与原版 CORS_ORIGINS 语义一致；开发期同源代理下通常用不到。 */
         @DefaultValue({"http://localhost:5173", "http://127.0.0.1:5173"}) List<String> corsOrigins) {
 
@@ -24,6 +34,14 @@ public record RagProperties(
             @DefaultValue("30s") Duration requestTimeout,
             /** 一整轮对话（含工具循环）的墙钟预算，须与 ai-service 的 chat_turn_timeout 对齐。 */
             @DefaultValue("300s") Duration chatTurnTimeout) {
+    }
+
+    /** 账号体系的首启引导参数。 */
+    public record Security(
+            /** 空库首个管理员邮箱；留空则不自动建号（改用随机密码路径）。 */
+            @DefaultValue("") String bootstrapAdminEmail,
+            /** 空库首个管理员密码；留空则生成随机密码并打印一次日志。 */
+            @DefaultValue("") String bootstrapAdminPassword) {
     }
 
     /**

@@ -1,7 +1,8 @@
 package com.raglatest.backend.api;
 
 import com.raglatest.backend.internal.AiServiceClient;
-import com.raglatest.backend.store.WorkspaceRepository;
+import com.raglatest.backend.security.CurrentUser;
+import com.raglatest.backend.service.WorkspaceAccessGuard;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,16 +19,20 @@ import tools.jackson.databind.JsonNode;
 public class ToolsController {
 
     private final AiServiceClient aiService;
-    private final WorkspaceRepository workspaces;
+    private final WorkspaceAccessGuard access;
 
-    public ToolsController(AiServiceClient aiService, WorkspaceRepository workspaces) {
+    public ToolsController(AiServiceClient aiService, WorkspaceAccessGuard access) {
         this.aiService = aiService;
-        this.workspaces = workspaces;
+        this.access = access;
     }
 
-    /** 与 python 版一致：不校验 workspace 是否存在（工具清单与工作区无关）。 */
+    /**
+     * 工具清单与工作区无关，但路由仍带 workspaceId：为了不让"存在一条不需要归属
+     * 校验的 workspace 子路由"成为先例（那正是越权最容易钻的缝），这里照样校验。
+     */
     @GetMapping("/workspaces/{workspaceId}/tools")
     public JsonNode listTools(@PathVariable String workspaceId) {
+        access.requireOwned(workspaceId, CurrentUser.id());
         return aiService.listTools();
     }
 
@@ -36,8 +41,7 @@ public class ToolsController {
             @PathVariable String workspaceId,
             @RequestParam("file") String file,
             @RequestParam("location") String location) {
-        workspaces.find(workspaceId)
-                .orElseThrow(() -> ApiException.notFound("workspace not found"));
+        access.requireOwned(workspaceId, CurrentUser.id());
         return aiService.preview(workspaceId, file, location);
     }
 }

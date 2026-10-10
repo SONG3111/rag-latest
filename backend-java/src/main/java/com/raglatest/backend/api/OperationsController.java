@@ -1,10 +1,11 @@
 package com.raglatest.backend.api;
 
 import com.raglatest.backend.api.dto.Dtos.OperationRead;
+import com.raglatest.backend.security.CurrentUser;
 import com.raglatest.backend.service.OperationService;
+import com.raglatest.backend.service.WorkspaceAccessGuard;
 import com.raglatest.backend.store.OperationRepository;
 import com.raglatest.backend.store.OperationRepository.OperationRow;
-import com.raglatest.backend.store.WorkspaceRepository;
 import java.util.List;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
@@ -25,13 +26,13 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api")
 public class OperationsController {
 
-    private final WorkspaceRepository workspaces;
+    private final WorkspaceAccessGuard access;
     private final OperationRepository operations;
     private final OperationService service;
 
-    public OperationsController(WorkspaceRepository workspaces, OperationRepository operations,
+    public OperationsController(WorkspaceAccessGuard access, OperationRepository operations,
                                 OperationService service) {
-        this.workspaces = workspaces;
+        this.access = access;
         this.operations = operations;
         this.service = service;
     }
@@ -42,7 +43,7 @@ public class OperationsController {
                                               @RequestParam(defaultValue = "") String status,
                                               @RequestParam(name = "status_filter", defaultValue = "")
                                               String statusFilter) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         String filter = !statusFilter.isBlank() ? statusFilter : status;
         List<OperationRow> rows = "proposed".equals(filter)
                 ? operations.listPending(workspaceId)
@@ -52,25 +53,20 @@ public class OperationsController {
 
     @PostMapping("/workspaces/{workspaceId}/operations/{operationId}/apply")
     public OperationRead apply(@PathVariable String workspaceId, @PathVariable String operationId) {
-        requireWorkspace(workspaceId);
-        return toRead(service.apply(workspaceId, operationId));
+        access.requireOwned(workspaceId, CurrentUser.id());
+        return toRead(service.apply(workspaceId, operationId, CurrentUser.id()));
     }
 
     @PostMapping("/workspaces/{workspaceId}/operations/{operationId}/reject")
     public OperationRead reject(@PathVariable String workspaceId, @PathVariable String operationId) {
-        requireWorkspace(workspaceId);
-        return toRead(service.reject(workspaceId, operationId));
+        access.requireOwned(workspaceId, CurrentUser.id());
+        return toRead(service.reject(workspaceId, operationId, CurrentUser.id()));
     }
 
     @PostMapping("/workspaces/{workspaceId}/operations/{operationId}/revert")
     public OperationRead revert(@PathVariable String workspaceId, @PathVariable String operationId) {
-        requireWorkspace(workspaceId);
-        return toRead(service.revert(workspaceId, operationId));
-    }
-
-    private void requireWorkspace(String workspaceId) {
-        workspaces.find(workspaceId)
-                .orElseThrow(() -> ApiException.notFound("workspace not found"));
+        access.requireOwned(workspaceId, CurrentUser.id());
+        return toRead(service.revert(workspaceId, operationId, CurrentUser.id()));
     }
 
     private static OperationRead toRead(OperationRow row) {

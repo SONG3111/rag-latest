@@ -1,9 +1,9 @@
 package com.raglatest.backend.store;
 
 import com.raglatest.backend.api.dto.Dtos.SummaryRow;
-import java.sql.Timestamp;
+import com.raglatest.backend.store.mapper.SummaryMapper;
+import java.time.OffsetDateTime;
 import java.util.Optional;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 /**
@@ -14,40 +14,18 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class ConversationSummaryRepository {
 
-    private final JdbcClient jdbc;
+    private final SummaryMapper mapper;
 
-    public ConversationSummaryRepository(JdbcClient jdbc) {
-        this.jdbc = jdbc;
+    public ConversationSummaryRepository(SummaryMapper mapper) {
+        this.mapper = mapper;
     }
 
     public Optional<SummaryRow> find(String workspaceId) {
-        return jdbc.sql("SELECT summary, covered_count FROM conversation_summaries WHERE workspace_id = :ws")
-                .param("ws", workspaceId)
-                .query((rs, i) -> new SummaryRow(rs.getString("summary"), rs.getInt("covered_count")))
-                .optional();
+        return Optional.ofNullable(mapper.find(workspaceId))
+                .map(row -> new SummaryRow(row.summary(), row.coveredCount()));
     }
 
     public void upsert(String workspaceId, String summary, int coveredCount) {
-        int updated = jdbc.sql("""
-                        UPDATE conversation_summaries
-                        SET summary = :summary, covered_count = :covered, updated_at = :updated
-                        WHERE workspace_id = :ws
-                        """)
-                .param("summary", summary)
-                .param("covered", coveredCount)
-                .param("updated", Timestamp.from(java.time.Instant.now()))
-                .param("ws", workspaceId)
-                .update();
-        if (updated == 0) {
-            jdbc.sql("""
-                            INSERT INTO conversation_summaries (workspace_id, summary, covered_count, updated_at)
-                            VALUES (:ws, :summary, :covered, :updated)
-                            """)
-                    .param("ws", workspaceId)
-                    .param("summary", summary)
-                    .param("covered", coveredCount)
-                    .param("updated", Timestamp.from(java.time.Instant.now()))
-                    .update();
-        }
+        mapper.upsert(workspaceId, summary, coveredCount, OffsetDateTime.now());
     }
 }

@@ -1,54 +1,39 @@
 package com.raglatest.backend.store;
 
-import java.sql.Timestamp;
+import com.raglatest.backend.store.mapper.OperationMapper;
+import com.raglatest.backend.store.mapper.OperationMapper.OperationRowData;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * operations 表：审批闭环的持久化。M2 只建 proposed 行；M3 补全
- * find / listPending / markApplied / markFailed / markRejected / updateArguments。
+ * operations 表：审批闭环的持久化（提案、列表、状态迁移、参数改写）。
+ *
+ * <p>多用户改造在这里加了两个只写不读的审计列：{@code proposed_by_user_id}（谁触发
+ * 了这次写入）与 {@code resolved_by_user_id}（谁批准的）。对外的 OperationRead
+ * 契约刻意不变（前端零改动），取证直接查库；等下一轮做"审计面板"时再露出来。</p>
  */
 @Repository
 public class OperationRepository {
 
-    private final JdbcClient jdbc;
-    private final ObjectMapper mapper;
+    private final OperationMapper mapper;
+    private final ObjectMapper json;
 
-    public OperationRepository(JdbcClient jdbc, ObjectMapper mapper) {
-        this.jdbc = jdbc;
+    public OperationRepository(OperationMapper mapper, ObjectMapper json) {
         this.mapper = mapper;
+        this.json = json;
     }
 
-    private static final String SELECT = """
-            SELECT id, tool_name, rel_path, arguments, diff, summary, status,
-                   backup_path, result, error, created_at, resolved_at
-            FROM operations
-            """;
-
     /** 建一条待确认提案行，返回生成的 id（替换进 proposal 帧后转发）。 */
-    public String insertProposed(String workspaceId, String toolName, String relPath,
+    public String insertProposed(String workspaceId, String userId, String toolName, String relPath,
                                  JsonNode arguments, JsonNode diff, String summary) {
         String id = WorkspaceRepository.newId();
-        jdbc.sql("""
-                        INSERT INTO operations
-                            (id, workspace_id, message_id, tool_name, rel_path, arguments,
-                             diff, summary, status, created_at)
-                        VALUES (:id, :ws, NULL, :tool, :relPath, :args, :diff, :summary,
-                                'proposed', :created)
-                        """)
-                .param("id", id)
-                .param("ws", workspaceId)
-                .param("tool", toolName)
-                .param("relPath", relPath)
-                .param("args", jsonText(arguments))
-                .param("diff", jsonText(diff, "[]"))
-                .param("summary", summary)
-                .param("created", Timestamp.from(java.time.Instant.now()))
-                .update();
+        mapper.insertProposed(id, workspaceId, userId, toolName, relPath,
+                jsonText(arguments), jsonText(diff, "[]"), summary, OffsetDateTime.now());
         return id;
     }
 
@@ -56,94 +41,54 @@ public class OperationRepository {
     public record OperationRow(String id, String toolName, String relPath, JsonNode arguments,
                                JsonNode diff, String summary, String status, String backupPath,
                                JsonNode result, String error,
-                               java.time.Instant createdAt, java.time.Instant resolvedAt) {}
+                               Instant createdAt, Instant resolvedAt) {}
 
     public List<OperationRow> listByWorkspace(String workspaceId) {
-        return jdbc.sql(SELECT + " WHERE workspace_id = :ws ORDER BY created_at ASC")
-                .param("ws", workspaceId)
-                .query(this::mapRow)
-                .list();
+        return mapper.listByWorkspace(workspaceId).stream().map(this::toRow).toList();
     }
 
     /** 仅待确认（proposed）的行，按创建时间正序——审批与 rebase 只用这批。 */
     public List<OperationRow> listPending(String workspaceId) {
-        return jdbc.sql(SELECT + " WHERE workspace_id = :ws AND status = 'proposed'"
-                        + " ORDER BY created_at ASC")
-                .param("ws", workspaceId)
-                .query(this::mapRow)
-                .list();
+        return mapper.listPending(workspaceId).stream().map(this::toRow).toList();
     }
 
     public Optional<OperationRow> find(String workspaceId, String operationId) {
-        return jdbc.sql(SELECT + " WHERE workspace_id = :ws AND id = :id")
-                .param("ws", workspaceId)
-                .param("id", operationId)
-                .query(this::mapRow)
-                .optional();
+        return Optional.ofNullable(mapper.find(workspaceId, operationId)).map(this::toRow);
     }
 
-    public void markApplied(String operationId, JsonNode result, JsonNode diff, String backupPath) {
-        jdbc.sql("""
-                        UPDATE operations
-                        SET status = 'applied', result = :result, diff = :diff,
-                            backup_path = :backup, error = NULL, resolved_at = :at
-                        WHERE id = :id
-                        """)
-                .param("result", jsonText(result))
-                .param("diff", jsonText(diff))
-                .param("backup", backupPath)
-                .param("at", Timestamp.from(java.time.Instant.now()))
-                .param("id", operationId)
-                .update();
+    public void markApplied(String operationId, String userId, JsonNode result, JsonNode diff,
+                            String backupPath) {
+        mapper.markApplied(operationId, userId, jsonText(result), jsonText(diff), backupPath,
+                OffsetDateTime.now());
     }
 
     public void markFailed(String operationId, String error) {
-        jdbc.sql("UPDATE operations SET status = 'failed', error = :error WHERE id = :id")
-                .param("error", error)
-                .param("id", operationId)
-                .update();
+        mapper.markFailed(operationId, error);
     }
 
-    public void markRejected(String operationId, String error) {
-        jdbc.sql("""
-                        UPDATE operations
-                        SET status = 'rejected', error = :error, resolved_at = :at
-                        WHERE id = :id
-                        """)
-                .param("error", error)
-                .param("at", Timestamp.from(java.time.Instant.now()))
-                .param("id", operationId)
-                .update();
+    public void markRejected(String operationId, String userId, String error) {
+        mapper.markRejected(operationId, userId, error, OffsetDateTime.now());
     }
 
     /** rebase / 摘要刷新：改写一条待确认提案的参数（链式 digest 或坐标位移）。 */
     public void updateArguments(String operationId, JsonNode arguments, String summary, JsonNode diff) {
-        jdbc.sql("""
-                        UPDATE operations
-                        SET arguments = :args, summary = :summary, diff = :diff
-                        WHERE id = :id
-                        """)
-                .param("args", jsonText(arguments))
-                .param("summary", summary)
-                .param("diff", jsonText(diff))
-                .param("id", operationId)
-                .update();
+        mapper.updateArguments(operationId, jsonText(arguments), summary, jsonText(diff));
     }
 
-    private OperationRow mapRow(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
+    private OperationRow toRow(OperationRowData row) {
         return new OperationRow(
-                rs.getString("id"),
-                rs.getString("tool_name"),
-                rs.getString("rel_path"),
-                parseJson(rs.getString("arguments")),
-                parseJson(rs.getString("diff")),
-                rs.getString("summary"),
-                rs.getString("status"),
-                rs.getString("backup_path"),
-                parseJson(rs.getString("result")),
-                rs.getString("error"),
-                WorkspaceRepository.toInstant(rs.getTimestamp("created_at")),
-                WorkspaceRepository.toInstant(rs.getTimestamp("resolved_at")));
+                row.id(),
+                row.toolName(),
+                row.relPath(),
+                parseJson(row.arguments()),
+                parseJson(row.diff()),
+                row.summary(),
+                row.status(),
+                row.backupPath(),
+                parseJson(row.result()),
+                row.error(),
+                WorkspaceRepository.toInstant(row.createdAt()),
+                WorkspaceRepository.toInstant(row.resolvedAt()));
     }
 
     private String jsonText(JsonNode node) {
@@ -158,6 +103,6 @@ public class OperationRepository {
         if (raw == null || raw.isBlank()) {
             return null;
         }
-        return mapper.readTree(raw);
+        return json.readTree(raw);
     }
 }

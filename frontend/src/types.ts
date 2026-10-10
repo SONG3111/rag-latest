@@ -7,6 +7,17 @@ export interface Workspace {
   file_count: number
 }
 
+/** 账号（/api/auth/me、/api/admin/users）。 */
+export interface User {
+  id: string
+  email: string
+  display_name: string
+  role: 'admin' | 'member'
+  status: 'active' | 'disabled'
+  last_login_at: string | null
+  created_at: string
+}
+
 export interface DocumentFile {
   id: string
   rel_path: string

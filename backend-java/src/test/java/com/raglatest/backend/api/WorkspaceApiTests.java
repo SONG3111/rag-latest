@@ -8,6 +8,9 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.queue.IndexingConsumer;
 import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.queue.ReindexTask;
+import com.raglatest.backend.support.ApiSession;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import com.raglatest.backend.store.MessageRepository;
 import com.raglatest.backend.store.TraceRepository;
 import com.raglatest.backend.store.TraceRepository.TraceNodeInput;
@@ -63,6 +66,7 @@ class WorkspaceApiTests {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "workspace_api");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -96,12 +100,15 @@ class WorkspaceApiTests {
     ReindexProducer reindexQueue;
 
     RestTemplate rest;
+    ApiSession session;
 
     @BeforeAll
     void setUpRestClient() {
         // Boot 4.1 的 resttestclient 自动配置类内省异常；这里直接对随机端口自建客户端，
         // 并关闭 4xx 抛错（对齐 TestRestTemplate 的行为，断言走状态码）。
         RestTemplate template = new RestTemplate();
+        session = new ApiSession();
+        template.getInterceptors().add(session);
         template.setUriTemplateHandler(new DefaultUriBuilderFactory(
                 "http://127.0.0.1:" + serverContext.getWebServer().getPort()));
         template.setErrorHandler(new org.springframework.web.client.ResponseErrorHandler() {
@@ -112,6 +119,8 @@ class WorkspaceApiTests {
             }
         });
         rest = template;
+        // 全部端点都要求登录；以引导管理员身份跑既有断言（多用户前它们是匿名的）。
+        session.login(rest, TestAccounts.ADMIN_EMAIL, TestAccounts.ADMIN_PASSWORD);
     }
 
     /** 消费者批量调 ai-service 的 /v1/index-batch（数组响应，与请求文件同序）；默认桩为空分块。 */
@@ -283,7 +292,7 @@ class WorkspaceApiTests {
     @Test
     void feedbackUpsertsAndClears() {
         String ws = createWorkspace("反馈");
-        String messageId = messages.insert(ws, "assistant", "答案", null, null);
+        String messageId = messages.insert(ws, null, "assistant", "答案", null, null);
 
         ResponseEntity<String> up = rest.postForEntity(
                 "/api/workspaces/{ws}/messages/{id}/feedback",
@@ -308,13 +317,13 @@ class WorkspaceApiTests {
         String ws = createWorkspace("消息");
         // created_at 毫秒精度：紧邻插入会同毫秒，排序退化到随机 id。隔开插入，
         // 让时间序成为唯一决定因素（本用例钉的就是时间序语义）。
-        messages.insert(ws, "user", "第一条", null, null);
+        messages.insert(ws, null, "user", "第一条", null, null);
         org.assertj.core.api.Assertions
                 .assertThatCode(() -> Thread.sleep(5)).doesNotThrowAnyException();
-        messages.insert(ws, "assistant", "第二条", null, null);
+        messages.insert(ws, null, "assistant", "第二条", null, null);
         org.assertj.core.api.Assertions
                 .assertThatCode(() -> Thread.sleep(5)).doesNotThrowAnyException();
-        messages.insert(ws, "user", "第三条", null, null);
+        messages.insert(ws, null, "user", "第三条", null, null);
 
         ResponseEntity<String> all = rest.getForEntity(
                 "/api/workspaces/{ws}/messages?limit=200", String.class, ws);
@@ -375,8 +384,11 @@ class WorkspaceApiTests {
                         [{"name": "read_range", "description": "d", "read_only": true,
                           "destructive": false, "requires_approval": false, "schema": {}}]
                         """)));
+        // 改造后工具清单路由也要求工作区归属（不再接受任意 id）：
+        // "有一条 workspace 子路由不需要校验"正是越权最容易钻的缝。
+        String ws = createWorkspace("工具清单");
         ResponseEntity<String> response = rest.getForEntity(
-                "/api/workspaces/whatever/tools", String.class);
+                "/api/workspaces/" + ws + "/tools", String.class);
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         List<Boolean> readOnlyFlags = com.jayway.jsonpath.JsonPath.read(
                 response.getBody(), "$[?(@.name=='read_range')].read_only");

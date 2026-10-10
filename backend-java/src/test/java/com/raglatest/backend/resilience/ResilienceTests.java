@@ -14,6 +14,9 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.jayway.jsonpath.JsonPath;
 import com.raglatest.backend.internal.AiServiceClient;
+import com.raglatest.backend.support.ApiSession;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -84,6 +87,7 @@ class ResilienceTests {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "resilience");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -122,10 +126,19 @@ class ResilienceTests {
     WebServerApplicationContext serverContext;
 
     RestTemplate rest;
+    ApiSession session;
+    /**
+     * 工具透传用例的目标工作区。改造前它们用 "ws-xxx" 这种不存在的 id（当时工具
+     * 路由不校验工作区），现在归属校验会把它变成 404 —— 用一个真实工作区，
+     * 让这些用例继续只测韧性语义。
+     */
+    String toolsWs;
 
     @BeforeAll
     void setUpRestClient() {
         RestTemplate template = new RestTemplate();
+        session = new ApiSession();
+        template.getInterceptors().add(session);
         template.setUriTemplateHandler(new DefaultUriBuilderFactory(
                 "http://127.0.0.1:" + serverContext.getWebServer().getPort()));
         template.setErrorHandler(new ResponseErrorHandler() {
@@ -135,6 +148,8 @@ class ResilienceTests {
             }
         });
         rest = template;
+        session.login(rest, TestAccounts.ADMIN_EMAIL, TestAccounts.ADMIN_PASSWORD);
+        toolsWs = createWorkspace("韧性-工具透传");
     }
 
     @BeforeEach
@@ -185,7 +200,7 @@ class ResilienceTests {
                 .willReturn(okJson("[]")));
 
         ResponseEntity<String> response = rest.getForEntity(
-                "/api/workspaces/{ws}/tools", String.class, "ws-retry");
+                "/api/workspaces/{ws}/tools", String.class, toolsWs);
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         // 1 次初始 + 2 次重试：恰好 3 次触达下游。
         aiService.verify(3, getRequestedFor(urlEqualTo("/v1/tools")));
@@ -199,7 +214,7 @@ class ResilienceTests {
                         .withBody("{\"detail\":\"bad tools\"}")));
 
         ResponseEntity<String> response = rest.getForEntity(
-                "/api/workspaces/{ws}/tools", String.class, "ws-400");
+                "/api/workspaces/{ws}/tools", String.class, toolsWs);
         assertThat(response.getStatusCode().value()).isEqualTo(400);
         assertThat(response.getBody()).contains("bad tools");
         // 4xx 不重试：仅 1 次触达下游。
@@ -216,13 +231,13 @@ class ResilienceTests {
 
         for (int i = 0; i < 3; i++) {
             ResponseEntity<String> failed = rest.getForEntity(
-                    "/api/workspaces/{ws}/tools", String.class, "ws-open");
+                    "/api/workspaces/{ws}/tools", String.class, toolsWs);
             assertThat(failed.getStatusCode().value()).isEqualTo(500);
         }
         assertThat(reads().getState()).isEqualTo(CircuitBreaker.State.OPEN);
 
         ResponseEntity<String> rejected = rest.getForEntity(
-                "/api/workspaces/{ws}/tools", String.class, "ws-open");
+                "/api/workspaces/{ws}/tools", String.class, toolsWs);
         assertThat(rejected.getStatusCode().value()).isEqualTo(503);
         // 熔断打开后快速失败，不再触达下游（仍是 3 次）。
         aiService.verify(3, getRequestedFor(urlEqualTo("/v1/tools")));
@@ -235,7 +250,7 @@ class ResilienceTests {
         aiService.stubFor(get(urlEqualTo("/v1/tools")).willReturn(okJson("[]")));
 
         ResponseEntity<String> response = rest.getForEntity(
-                "/api/workspaces/{ws}/tools", String.class, "ws-recover");
+                "/api/workspaces/{ws}/tools", String.class, toolsWs);
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(reads().getState()).isEqualTo(CircuitBreaker.State.CLOSED);
     }
@@ -303,7 +318,7 @@ class ResilienceTests {
                         .withBody("{\"detail\":\"upstream busy\"}")));
 
         ResponseEntity<String> response = rest.getForEntity(
-                "/api/workspaces/{ws}/tools", String.class, "ws-exhausted");
+                "/api/workspaces/{ws}/tools", String.class, toolsWs);
         assertThat(response.getStatusCode().value()).isEqualTo(503);
         assertThat(response.getBody()).contains("upstream busy");
         aiService.verify(3, getRequestedFor(urlEqualTo("/v1/tools")));

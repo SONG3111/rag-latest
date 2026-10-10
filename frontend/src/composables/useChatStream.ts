@@ -8,6 +8,7 @@
  */
 
 import { drainSseEvents } from './sse'
+import { csrfHeaders, notifyUnauthorized } from '@/api'
 
 export interface StreamHandlers {
   onToken?: (payload: { text: string }) => void
@@ -37,15 +38,24 @@ export async function streamChat(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
+  // 聊天是 POST + 流式响应（EventSource 只支持 GET），因此和普通变更请求一样
+  // 需要 CSRF 头；少了它会被 CSRF 过滤器拦成 403，且症状是"点了没反应"。
   const response = await fetch(`/api/workspaces/${workspaceId}/chat/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      ...(await csrfHeaders()),
+    },
     body: JSON.stringify({ message }),
     signal,
+    // 登录态是 HttpOnly 会话 Cookie：不带 credentials 就等于匿名请求。
+    credentials: 'same-origin',
   })
 
   // 非 2xx 时后端会给出可读的 detail（如韧性快速失败的 503 文案），不要丢弃它。
   if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
     const detail = await response
       .json()
       .then((body: { detail?: string }) => body?.detail)

@@ -8,6 +8,8 @@ import com.raglatest.backend.config.CacheConfig;
 import com.raglatest.backend.internal.AiServiceClient;
 import com.raglatest.backend.queue.ReindexProducer;
 import com.raglatest.backend.service.FileStorage;
+import com.raglatest.backend.service.WorkspaceAccessGuard;
+import com.raglatest.backend.security.CurrentUser;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.WorkspaceRepository;
 import java.io.IOException;
@@ -49,6 +51,7 @@ public class WorkspaceController {
     private static final Logger log = LoggerFactory.getLogger(WorkspaceController.class);
 
     private final WorkspaceRepository workspaces;
+    private final WorkspaceAccessGuard access;
     private final DocumentFileRepository files;
     private final FileStorage storage;
     private final ReindexProducer reindexQueue;
@@ -56,25 +59,28 @@ public class WorkspaceController {
 
     public WorkspaceController(WorkspaceRepository workspaces, DocumentFileRepository files,
                                FileStorage storage, ReindexProducer reindexQueue,
-                               AiServiceClient aiService) {
+                               AiServiceClient aiService, WorkspaceAccessGuard access) {
         this.workspaces = workspaces;
         this.files = files;
         this.storage = storage;
         this.reindexQueue = reindexQueue;
         this.aiService = aiService;
+        this.access = access;
     }
 
     // ------------------------------------------------------------------ //
     // workspaces
     // ------------------------------------------------------------------ //
+    /** 只列出当前用户拥有的工作区（admin 也不过界，见 docs/07）。 */
     @GetMapping("/workspaces")
     public List<WorkspaceRead> listWorkspaces() {
-        return workspaces.list();
+        return workspaces.listOwnedBy(CurrentUser.id());
     }
 
     @PostMapping("/workspaces")
     public ResponseEntity<WorkspaceRead> createWorkspace(@Valid @RequestBody WorkspaceCreate payload) {
-        WorkspaceRead workspace = workspaces.create(payload.name().strip(), payload.description());
+        WorkspaceRead workspace = workspaces.create(
+                payload.name().strip(), payload.description(), CurrentUser.id());
         try {
             Files.createDirectories(storage.workspaceDir(workspace.id()));
         } catch (IOException ex) {
@@ -86,14 +92,14 @@ public class WorkspaceController {
 
     @GetMapping("/workspaces/{workspaceId}")
     public WorkspaceRead getWorkspace(@PathVariable String workspaceId) {
-        return requireWorkspace(workspaceId);
+        return access.requireOwned(workspaceId, CurrentUser.id());
     }
 
     /** 删除工作区：chunks 级联清掉，corpus 缓存里这份语料一并失效。 */
     @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId")
     @DeleteMapping("/workspaces/{workspaceId}")
     public ResponseEntity<Void> removeWorkspace(@PathVariable String workspaceId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         try {
             aiService.dropCollection(workspaceId);
         } catch (Exception ex) {
@@ -110,7 +116,7 @@ public class WorkspaceController {
     // ------------------------------------------------------------------ //
     @GetMapping("/workspaces/{workspaceId}/files")
     public List<FileRead> listFiles(@PathVariable String workspaceId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         return files.listByWorkspace(workspaceId);
     }
 
@@ -124,7 +130,7 @@ public class WorkspaceController {
     public ResponseEntity<List<IndexingResponse>> uploadFiles(
             @PathVariable String workspaceId,
             @RequestParam("files") List<MultipartFile> uploads) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         List<IndexingResponse> results = new ArrayList<>();
         for (MultipartFile upload : uploads) {
             byte[] content;
@@ -154,7 +160,7 @@ public class WorkspaceController {
     @PostMapping("/workspaces/{workspaceId}/files/{fileId}/reindex")
     public IndexingResponse reindexFile(@PathVariable String workspaceId,
                                         @PathVariable String fileId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         FileRead record = files.findInWorkspace(workspaceId, fileId)
                 .orElseThrow(() -> ApiException.notFound("file not found"));
         files.markIndexing(record.id());
@@ -165,7 +171,7 @@ public class WorkspaceController {
     /** 重建整个工作区的索引：分块/嵌入变更后从源文件重建（派生数据不就地修补），全量入队。 */
     @PostMapping("/workspaces/{workspaceId}/reindex")
     public List<IndexingResponse> reindexWorkspace(@PathVariable String workspaceId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         List<IndexingResponse> results = new ArrayList<>();
         for (FileRead file : files.listByWorkspace(workspaceId)) {
             files.markIndexing(file.id());
@@ -179,7 +185,7 @@ public class WorkspaceController {
     @CacheEvict(cacheNames = CacheConfig.RETRIEVAL_CORPUS, key = "#workspaceId")
     @DeleteMapping("/workspaces/{workspaceId}/files/{fileId}")
     public ResponseEntity<Void> removeFile(@PathVariable String workspaceId, @PathVariable String fileId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         FileRead record = files.findInWorkspace(workspaceId, fileId)
                 .orElseThrow(() -> ApiException.notFound("file not found"));
         try {
@@ -195,7 +201,7 @@ public class WorkspaceController {
     @GetMapping("/workspaces/{workspaceId}/files/{fileId}/download")
     public ResponseEntity<FileSystemResource> downloadFile(
             @PathVariable String workspaceId, @PathVariable String fileId) {
-        requireWorkspace(workspaceId);
+        access.requireOwned(workspaceId, CurrentUser.id());
         FileRead record = files.findInWorkspace(workspaceId, fileId)
                 .orElseThrow(() -> ApiException.notFound("file not found"));
         Path path = storage.resolveWorkspacePath(workspaceId, record.relPath());
@@ -209,11 +215,6 @@ public class WorkspaceController {
                 .filename(record.relPath(), java.nio.charset.StandardCharsets.UTF_8)
                 .build());
         return ResponseEntity.ok().headers(headers).body(new FileSystemResource(path));
-    }
-
-    WorkspaceRead requireWorkspace(String workspaceId) {
-        return workspaces.find(workspaceId)
-                .orElseThrow(() -> ApiException.notFound("workspace not found"));
     }
 
     static void deleteDirectoryTree(Path directory) {

@@ -66,9 +66,14 @@ public class OperationService {
         this.reindexQueue = reindexQueue;
     }
 
-    /** 备份目标文件后真正执行写操作；失败时登记原因并抛出可读错误。 */
+    /**
+     * 备份目标文件后真正执行写操作；失败时登记原因并抛出可读错误。
+     *
+     * <p>{@code userId} 是批准人（审计列 resolved_by_user_id），由控制器从登录态取，
+     * 服务层不自己去翻 SecurityContext——审批也用于后台自动驳回，那种场景没有"人"。</p>
+     */
     @CacheEvict(cacheNames = "aiPreview", allEntries = true)
-    public OperationRow apply(String workspaceId, String operationId) {
+    public OperationRow apply(String workspaceId, String operationId, String userId) {
         OperationRow op = operations.find(workspaceId, operationId)
                 .orElseThrow(() -> ApiException.notFound("operation not found"));
         if (!"proposed".equals(op.status()) && !"failed".equals(op.status())) {
@@ -113,7 +118,7 @@ public class OperationService {
         JsonNode data = payload.path("data");
         JsonNode changes = data.path("changes");
         JsonNode diff = changes.isArray() && !changes.isEmpty() ? changes : op.diff();
-        operations.markApplied(operationId, data, diff, backupPath);
+        operations.markApplied(operationId, userId, data, diff, backupPath);
         // 先落重排再刷新链式 digest：refresh 必须落在重排后的参数上，
         // digest 永远是参数里最新的那个值，而不是被重排恢复的旧值。
         applyRebasePlan(planRebase(workspaceId, op));
@@ -129,20 +134,20 @@ public class OperationService {
         return operations.find(workspaceId, operationId).orElseThrow();
     }
 
-    public OperationRow reject(String workspaceId, String operationId) {
+    public OperationRow reject(String workspaceId, String operationId, String userId) {
         OperationRow op = operations.find(workspaceId, operationId)
                 .orElseThrow(() -> ApiException.notFound("operation not found"));
         if (!"proposed".equals(op.status())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "operation is already " + op.status() + "; nothing to reject");
         }
-        operations.markRejected(operationId, null);
+        operations.markRejected(operationId, userId, null);
         return operations.find(workspaceId, operationId).orElseThrow();
     }
 
     /** 还原备份后文件内容同样变了，预览缓存一并失效（与 apply 对称）。 */
     @CacheEvict(cacheNames = "aiPreview", allEntries = true)
-    public OperationRow revert(String workspaceId, String operationId) {
+    public OperationRow revert(String workspaceId, String operationId, String userId) {
         OperationRow op = operations.find(workspaceId, operationId)
                 .orElseThrow(() -> ApiException.notFound("operation not found"));
         if (!"applied".equals(op.status())) {
@@ -158,7 +163,7 @@ public class OperationService {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "could not restore the backup: " + ex.getMessage());
         }
-        operations.markRejected(operationId, "reverted to the pre-change backup");
+        operations.markRejected(operationId, userId, "reverted to the pre-change backup");
         // 与 apply 同理：还原后的文件分块已过期，先标 indexing 再投递持久化重建任务
         files.findByRelPath(workspaceId, op.relPath()).ifPresent(file -> {
             files.markIndexing(file.id());
@@ -327,7 +332,8 @@ public class OperationService {
     private void applyRebasePlan(List<RebasePlanEntry> plan) {
         for (RebasePlanEntry entry : plan) {
             if (entry.newArguments() == null) {
-                operations.markRejected(entry.operation().id(), REBASE_REJECT_ERROR);
+                // 系统自动驳回，没有说话的人：审计列的 resolved_by_user_id 留空。
+                operations.markRejected(entry.operation().id(), null, REBASE_REJECT_ERROR);
                 continue;
             }
             String summary = OperationSummaries.summarize(

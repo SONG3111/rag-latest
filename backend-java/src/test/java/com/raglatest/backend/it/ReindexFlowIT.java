@@ -5,6 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.raglatest.backend.store.WorkspaceRepository;
+import com.raglatest.backend.identity.UserRepository;
+import com.raglatest.backend.support.ApiSession;
+import com.raglatest.backend.support.EmbeddedPostgresSupport;
+import com.raglatest.backend.support.TestAccounts;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -66,6 +70,7 @@ class ReindexFlowIT {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        EmbeddedPostgresSupport.register(registry, "reindex_flow");
         if (aiService == null) {
             aiService = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
             aiService.start();
@@ -89,6 +94,8 @@ class ReindexFlowIT {
     @Autowired
     WorkspaceRepository workspaces;
     @Autowired
+    UserRepository users;
+    @Autowired
     RabbitAdmin amqpAdmin;
     @Autowired
     WebServerApplicationContext serverContext;
@@ -96,10 +103,13 @@ class ReindexFlowIT {
     org.springframework.amqp.rabbit.core.RabbitTemplate rabbitTemplate;
 
     RestTemplate rest;
+    ApiSession session;
 
     @org.junit.jupiter.api.BeforeAll
     void setUpRestClient() {
         RestTemplate template = new RestTemplate();
+        session = new ApiSession();
+        template.getInterceptors().add(session);
         template.setUriTemplateHandler(new DefaultUriBuilderFactory(
                 "http://127.0.0.1:" + serverContext.getWebServer().getPort()));
         template.setErrorHandler(new ResponseErrorHandler() {
@@ -109,6 +119,7 @@ class ReindexFlowIT {
             }
         });
         rest = template;
+        session.login(rest, TestAccounts.ADMIN_EMAIL, TestAccounts.ADMIN_PASSWORD);
         // 批量端点：上传用例只传 1 个文件（攒批后单文件成批），响应为单元素数组
         aiService.stubFor(com.github.tomakehurst.wiremock.client.WireMock
                 .post(com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/index-batch"))
@@ -125,7 +136,7 @@ class ReindexFlowIT {
 
     @Test
     void uploadFlowsThroughQueueToIndexedFile() throws Exception {
-        var workspace = workspaces.create("队列端到端", null);
+        var workspace = workspaces.create("队列端到端", null, TestAccounts.ownerId(users));
         String ws = workspace.id();
 
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();

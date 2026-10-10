@@ -4,6 +4,7 @@ import com.raglatest.backend.api.ApiException;
 import com.raglatest.backend.config.CacheConfig;
 import com.raglatest.backend.config.RagProperties;
 import com.raglatest.backend.config.ResilienceConfig;
+import com.raglatest.backend.security.InternalToken;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
@@ -59,13 +60,17 @@ public class AiServiceClient {
     private final CircuitBreaker readsCircuitBreaker;
     private final CircuitBreaker chatCircuitBreaker;
 
-    public AiServiceClient(RagProperties properties, CircuitBreakerRegistry circuitBreakers) {
+    public AiServiceClient(RagProperties properties, CircuitBreakerRegistry circuitBreakers,
+                           InternalToken internalToken) {
         this.requestTimeout = properties.aiService().requestTimeout();
         this.longOperationTimeout = properties.aiService().chatTurnTimeout();
         HttpClient httpClient = HttpClient.create().noProxy();
         this.webClient = WebClient.builder()
                 .baseUrl(properties.aiService().baseUrl())
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
+                // 内部契约的统一凭据：ai-service 的 /v1 没有会话可言，
+                // 共享密钥是这条内网边界的唯一门（服务端校验见其 internal auth 中间件）。
+                .defaultHeader(InternalToken.HEADER, internalToken.value())
                 .build();
         this.readsCircuitBreaker = circuitBreakers.circuitBreaker(READS_CIRCUIT);
         // 聊天实例用专用配置：整轮墙钟记成功/慢成功，不得按“慢调用”开闸（见 ResilienceConfig）。

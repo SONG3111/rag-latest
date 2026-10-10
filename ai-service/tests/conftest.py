@@ -39,6 +39,20 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_internal_token(monkeypatch: pytest.MonkeyPatch):
+    """测试不受开发者 .env 里的 INTERNAL_TOKEN 影响。
+
+    Settings 会读仓库根的 .env（本地开发正常配置），而一旦那里配了 INTERNAL_TOKEN，
+    /v1 内部契约就会被强制校验——测试没带请求头，于是整轮对话、索引、工具调用全部
+    变成 401，症状是"某些用例忽然拿不到 SSE 帧"。测试必须自洽：这里默认把门槛关掉，
+    由 tests/test_internal_token.py 自己显式打开来验证拦截行为。
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "internal_token", "", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_small_model_calls(monkeypatch: pytest.MonkeyPatch):
     """Fail fast instead of contacting the small-model channel.
 
@@ -93,6 +107,11 @@ def app_with_temp_storage(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mcp_client, "build_server_params", builder)
     yield app
+    # create_app 装配的文件日志 handler 指向本测试的临时目录，收尾必须卸载：
+    # Windows 上残留句柄会让 tmp_path 清理失败。
+    from app.logging_setup import close_file_logging
+
+    close_file_logging()
 
 
 def seed_workspace_file(workspace_id: str, rel_path: str, content: bytes) -> Path:

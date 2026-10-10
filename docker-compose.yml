@@ -12,6 +12,10 @@ services:
       AI_SERVICE_URL: http://ai-service:8001
       RABBITMQ_HOST: rabbitmq
       REDIS_HOST: redis
+      # 服务名解析：容器间走 compose 网络，宿主机回环端口只给本机裸跑用。
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-rag}
+      # 与 ai-service 共享的内部密钥（来自 .env）；两侧必须一致。
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?INTERNAL_TOKEN 必须在 .env 中设置}
     volumes:
       - ./data:/app/data
     ports:
@@ -19,11 +23,47 @@ services:
     depends_on:
       ai-service:
         condition: service_started
+      # 业务库是启动强依赖：迁移（Flyway）在建库前后语义完全不同，不健康就不拉起后端。
+      postgres:
+        condition: service_healthy
       # 索引任务队列与读缓存是启动强依赖：队列/缓存未就绪前不拉起后端。
       rabbitmq:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  # 业务库（多用户改造：SQLite 单写者与"多人同时用"直接冲突，故换 Postgres）。
+  # 健康检查用 pg_isready（官方镜像自带该工具），与 rabbitmq/redis 的写法一致。
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      # 仅宿主机回环：本地裸跑 backend 时连 127.0.0.1:5432，对外不暴露。
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-rag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # 向量库服务端模式：嵌入式实现被单进程独占（服务与评测脚本不能并存），
+  # 服务化之后每个 workspace 仍是一个独立 collection，隔离语义不变。
+  # 版本与 docs/07 记录的一致（v1.19.2）。
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      # 仅宿主机回环：观测/调试用；容器间走 http://qdrant:6333。
+      - "127.0.0.1:6333:6333"
     restart: unless-stopped
 
   # Python AI 服务：agent/检索/嵌入 + MCP 子进程，仅内网 8001。
@@ -35,8 +75,10 @@ services:
       - .env
     environment:
       DATA_DIR: /app/data
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?INTERNAL_TOKEN 必须在 .env 中设置}
+      QDRANT_URL: http://qdrant:6333
     volumes:
-      # Workspaces, backups, and the vector index all live here.
+      # 工作区文件、备份、spill 与日志都在这里（向量索引已移出，见 QDRANT_URL）。
       - ./data:/app/data
       # Local embedding / reranking weights, mounted read-only. The paths in .env
       # must be the in-container paths (/models/bge-m3, /models/bge-reranker-v2-m3)
@@ -44,6 +86,9 @@ services:
       - ${LOCAL_MODELS_DIR:-C:/code/agent/rag/models}:/models:ro
     expose:
       - "8001"
+    depends_on:
+      qdrant:
+        condition: service_started
     restart: unless-stopped
 
   # 索引任务队列（持久化）：上传/写后重建全异步化，backend 是唯一生产/消费者。
@@ -98,3 +143,5 @@ services:
 volumes:
   rabbitmq-data:
   redis-data:
+  pg-data:
+  qdrant-data:

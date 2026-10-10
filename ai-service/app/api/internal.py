@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import anyio
 import hashlib
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..llm.providers import build_embeddings
+from ..logging_setup import index_logger, text_preview
 from ..mcp_client import parse_tool_result
 from ..retrieval.bm25 import token_counts
 from ..retrieval.chunking import chunk_document_groups
@@ -29,6 +31,8 @@ from ..services.files import IngestionError, resolve_workspace_path
 from ..services.preview import PreviewError, build_preview
 
 logger = logging.getLogger(__name__)
+# 索引链路明细（逐 chunk 行/嵌入批次/向量写入）：只落日志文件，不刷控制台。
+detail = index_logger()
 
 router = APIRouter(prefix="/v1")
 
@@ -163,13 +167,15 @@ def _parse_chunks(
         logger.exception("parsing failed for %s", rel_path)
         return f"parse failed: {exc}"
 
+    detail.info("parse.start ws=%s file=%s", workspace_id, rel_path)
+
     rows: list[dict[str, Any]] = []
     child_rows: list[dict[str, Any]] = []
     ordinal = 0
-    for group in groups:
+    for group_index, group in enumerate(groups, start=1):
         parent_counts = token_counts(group.parent.text)
         parent_id = uuid.uuid4().hex
-        rows.append({
+        parent_row = {
             "id": parent_id,
             "parent_id": None,
             "level": "parent",
@@ -179,7 +185,17 @@ def _parse_chunks(
             "meta": group.parent.meta,
             "token_counts": parent_counts,
             "token_length": sum(parent_counts.values()),
-        })
+        }
+        rows.append(parent_row)
+        detail.info(
+            "chunk.parent ws=%s file=%s group=%d id=%s ordinal=%d tokens=%d "
+            "chars=%d location=%s meta=%s tok_counts=%s text=%s",
+            workspace_id, rel_path, group_index, parent_id, ordinal,
+            parent_row["token_length"], len(group.parent.text), group.parent.location,
+            json.dumps(group.parent.meta, ensure_ascii=False),
+            json.dumps(parent_counts, ensure_ascii=False),
+            text_preview(group.parent.text),
+        )
         ordinal += 1
         for child in group.children:
             child_counts = token_counts(child.text)
@@ -194,9 +210,25 @@ def _parse_chunks(
                 "token_counts": child_counts,
                 "token_length": sum(child_counts.values()),
             }
-            ordinal += 1
             rows.append(row)
             child_rows.append(row)
+            detail.info(
+                "chunk.child ws=%s file=%s group=%d id=%s parent=%s ordinal=%d "
+                "tokens=%d chars=%d location=%s meta=%s tok_counts=%s text=%s",
+                workspace_id, rel_path, group_index, row["id"], parent_id, ordinal,
+                row["token_length"], len(child.text), child.location,
+                json.dumps(child.meta, ensure_ascii=False),
+                json.dumps(child_counts, ensure_ascii=False),
+                text_preview(child.text),
+            )
+            ordinal += 1
+    detail.info(
+        "parse.summary ws=%s file=%s groups=%d parents=%d children=%d "
+        "child_tokens_total=%d chunk_size=%d overlap=%d",
+        workspace_id, rel_path, len(groups), len(rows) - len(child_rows),
+        len(child_rows), sum(row["token_length"] for row in child_rows),
+        settings.chunk_size_tokens, settings.chunk_overlap_tokens,
+    )
     return rows, child_rows, path
 
 
@@ -225,10 +257,17 @@ def _write_vectors(
     store = VectorStore(settings)
     try:
         store.delete_file(workspace_id, file.file_id)
+        detail.info(
+            "vectors.clear ws=%s file=%s(%s)", workspace_id, file.rel_path, file.file_id
+        )
     except Exception as exc:
         logger.warning("could not clear old vectors for %s: %s", file.file_id, exc)
 
     if vectors is None:
+        detail.info(
+            "vectors.skipped ws=%s file=%s(%s) reason=embedding-unavailable",
+            workspace_id, file.rel_path, file.file_id,
+        )
         return 0, None
     try:
         count = store.upsert_vectors(
@@ -245,6 +284,10 @@ def _write_vectors(
                 for row in child_rows
             ],
         )
+        detail.info(
+            "vectors.written ws=%s file=%s(%s) points=%d",
+            workspace_id, file.rel_path, file.file_id, count,
+        )
         return count, None
     except Exception as exc:
         logger.warning(
@@ -257,18 +300,30 @@ def _write_vectors(
 
 def _index_one_sync(settings, payload: IndexRequest) -> dict[str, Any]:
     """单文件索引的同步核心（跑在 executor 线程上）。"""
+    detail.info(
+        "single.start ws=%s file=%s(%s)",
+        payload.workspace_id, payload.rel_path, payload.file_id,
+    )
     parsed = _parse_chunks(settings, payload.workspace_id, payload.rel_path)
     if isinstance(parsed, str):
+        detail.info(
+            "single.result ws=%s file=%s(%s) status=failed error=%s",
+            payload.workspace_id, payload.rel_path, payload.file_id, parsed,
+        )
         return _index_failed(parsed)
     rows, child_rows, path = parsed
 
+    detail.info(
+        "embed.texts ws=%s file=%s texts=%d",
+        payload.workspace_id, payload.rel_path, len(child_rows),
+    )
     vectors, embed_error = _embed_texts(settings, [row["text"] for row in child_rows])
     vector_count, upsert_error = _write_vectors(
         settings, payload.workspace_id, IndexFile(file_id=payload.file_id, rel_path=payload.rel_path),
         child_rows, vectors,
     )
     vector_error = embed_error or upsert_error
-    return {
+    result = {
         "status": "indexed",
         "chunk_count": len(child_rows),
         "vector_count": vector_count,
@@ -276,17 +331,35 @@ def _index_one_sync(settings, payload: IndexRequest) -> dict[str, Any]:
         "checksum": _sha256_file(path),
         "chunks": rows,
     }
+    detail.info(
+        "single.result ws=%s file=%s(%s) status=%s chunks=%d vectors=%d "
+        "checksum=%.12s error=%s",
+        payload.workspace_id, payload.rel_path, payload.file_id,
+        result["status"], result["chunk_count"], result["vector_count"],
+        result["checksum"], result["error"],
+    )
+    return result
 
 
 def _index_batch_sync(settings, payload: IndexBatchRequest) -> list[dict[str, Any]]:
     """批量索引的同步核心：逐文件解析（单文件失败不拖垮整批）→ 全部 child 一次嵌入
     → 逐文件写向量。返回与单文件响应同构的结果数组，顺序与请求 files 一致。"""
+    detail.info(
+        "batch.start ws=%s files=%d paths=%s",
+        payload.workspace_id, len(payload.files),
+        [file.rel_path for file in payload.files],
+    )
     parsed: list[Any] = []
     for file in payload.files:
         try:
             parsed.append(_parse_chunks(settings, payload.workspace_id, file.rel_path))
         except IngestionError as exc:
             parsed.append(f"invalid path: {exc}")
+    ok_count = sum(1 for entry in parsed if not isinstance(entry, str))
+    detail.info(
+        "batch.parsed ws=%s ok=%d failed=%d",
+        payload.workspace_id, ok_count, len(parsed) - ok_count,
+    )
 
     # 跨文件合并嵌入：一次 embed_documents 让长度排序池覆盖全部文件，
     # 减小 per-call 的排序/tokenizer 边界开销与 padding 浪费。
@@ -294,12 +367,19 @@ def _index_batch_sync(settings, payload: IndexBatchRequest) -> list[dict[str, An
     for entry in parsed:
         if not isinstance(entry, str):
             all_texts.extend(row["text"] for row in entry[1])
+    detail.info(
+        "embed.merged ws=%s texts=%d", payload.workspace_id, len(all_texts)
+    )
     vectors, embed_error = _embed_texts(settings, all_texts)
 
     results: list[dict[str, Any]] = []
     offset = 0
     for file, entry in zip(payload.files, parsed):
         if isinstance(entry, str):
+            detail.info(
+                "batch.result ws=%s file=%s(%s) status=failed error=%s",
+                payload.workspace_id, file.rel_path, file.file_id, entry,
+            )
             results.append(_index_failed(entry))
             continue
         rows, child_rows, path = entry
@@ -310,14 +390,22 @@ def _index_batch_sync(settings, payload: IndexBatchRequest) -> list[dict[str, An
         vector_count, upsert_error = _write_vectors(
             settings, payload.workspace_id, file, child_rows, file_vectors)
         vector_error = embed_error or upsert_error
-        results.append({
+        result = {
             "status": "indexed",
             "chunk_count": len(child_rows),
             "vector_count": vector_count,
             "error": (f"dense index unavailable: {vector_error}" if vector_error else None),
             "checksum": _sha256_file(path),
             "chunks": rows,
-        })
+        }
+        results.append(result)
+        detail.info(
+            "batch.result ws=%s file=%s(%s) status=%s chunks=%d vectors=%d "
+            "checksum=%.12s error=%s",
+            payload.workspace_id, file.rel_path, file.file_id,
+            result["status"], result["chunk_count"], result["vector_count"],
+            result["checksum"], result["error"],
+        )
     return results
 
 

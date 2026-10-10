@@ -32,8 +32,22 @@ class Settings(BaseSettings):
 
     # --- storage ---
     # SQLite (app.db) is owned exclusively by backend-java; the ai-service keeps
-    # no relational state, only the workspace/qdrant trees under data_dir.
+    # no relational state, only the workspace/spill/log trees under data_dir
+    # (plus the embedded vector index when QDRANT_URL is not set).
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
+
+    # --- internal boundary ---
+    # Java ↔ ai-service 之间的共享密钥（请求头 X-Internal-Token）。两侧必须一致。
+    # 未配置时 /v1 契约不设防（仅限"本机裸跑/测试"）：这种情形启动时会打一条醒目
+    # 警告。Java 侧是 fail-closed（未配置直接启动失败），因为 8000 是对外端口；
+    # 这里的 8001 不发布到宿主机，因此保留"零配置可跑"以维持既有开发体验。
+    internal_token: str = Field(default="", alias="INTERNAL_TOKEN")
+
+    # --- vector store ---
+    # 服务端模式的 Qdrant（compose 里的 qdrant 服务）。留空则退回进程内嵌入式
+    # 模式（data_dir/qdrant）：该模式被单进程独占，只保留给本机开发与测试。
+    qdrant_url: str = Field(default="", alias="QDRANT_URL")
+    qdrant_api_key: str = Field(default="", alias="QDRANT_API_KEY")
 
     # --- models ---
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")

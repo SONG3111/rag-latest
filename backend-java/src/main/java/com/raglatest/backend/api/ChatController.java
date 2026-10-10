@@ -6,9 +6,12 @@ import com.raglatest.backend.api.dto.Dtos.MessageRead;
 import com.raglatest.backend.api.dto.Dtos.SummaryRow;
 import com.raglatest.backend.config.RagProperties;
 import com.raglatest.backend.internal.AiServiceClient;
+import com.raglatest.backend.security.CurrentUser;
 import com.raglatest.backend.service.Answers;
+import com.raglatest.backend.service.PerUserChatLimiter;
 import com.raglatest.backend.service.StaleFileDetector;
 import com.raglatest.backend.service.StaleFileDetector.StaleFile;
+import com.raglatest.backend.service.WorkspaceAccessGuard;
 import com.raglatest.backend.store.ConversationSummaryRepository;
 import com.raglatest.backend.store.DocumentFileRepository;
 import com.raglatest.backend.store.MessageRepository;
@@ -63,6 +66,7 @@ public class ChatController {
     private static final Duration UPSTREAM_MARGIN = Duration.ofSeconds(30);
 
     private final WorkspaceRepository workspaces;
+    private final WorkspaceAccessGuard access;
     private final MessageRepository messages;
     private final ConversationSummaryRepository summaries;
     private final DocumentFileRepository documentFiles;
@@ -71,10 +75,12 @@ public class ChatController {
     private final StaleFileDetector staleFiles;
     private final AiServiceClient aiService;
     private final Bulkhead chatTurnBulkhead;
+    private final PerUserChatLimiter perUserChatLimiter;
     private final ObjectMapper mapper;
     private final Duration chatTurnTimeout;
 
     public ChatController(WorkspaceRepository workspaces,
+                           WorkspaceAccessGuard access,
                            MessageRepository messages,
                            ConversationSummaryRepository summaries,
                            DocumentFileRepository documentFiles,
@@ -83,9 +89,11 @@ public class ChatController {
                            StaleFileDetector staleFiles,
                            AiServiceClient aiService,
                            Bulkhead chatTurnBulkhead,
+                           PerUserChatLimiter perUserChatLimiter,
                            ObjectMapper mapper,
                            RagProperties properties) {
         this.workspaces = workspaces;
+        this.access = access;
         this.messages = messages;
         this.summaries = summaries;
         this.documentFiles = documentFiles;
@@ -94,6 +102,7 @@ public class ChatController {
         this.staleFiles = staleFiles;
         this.aiService = aiService;
         this.chatTurnBulkhead = chatTurnBulkhead;
+        this.perUserChatLimiter = perUserChatLimiter;
         this.mapper = mapper;
         this.chatTurnTimeout = properties.aiService().chatTurnTimeout();
     }
@@ -102,16 +111,17 @@ public class ChatController {
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@PathVariable String workspaceId,
                                  @Valid @RequestBody ChatRequest payload) {
-        if (!workspaces.exists(workspaceId)) {
-            throw ApiException.notFound("workspace not found");
-        }
+        String userId = CurrentUser.id();
+        // 归属校验先于任何副作用：不属于自己的工作区不建 SSE、不写库。
+        access.requireOwned(workspaceId, userId);
         // 韧性前置：熔断开闸或舱壁已满时快速失败，不建 SSE、不写库（避免等满超时）。
         if (aiService.chatCircuitState() == CircuitBreaker.State.OPEN) {
             throw ApiException.serviceUnavailable("AI 服务暂时不可用，请稍后重试");
         }
 
         String runId = WorkspaceRepository.newId();
-        ChatTurnState state = new ChatTurnState(workspaceId, runId, chatTurnBulkhead);
+        ChatTurnState state =
+                new ChatTurnState(workspaceId, runId, userId, chatTurnBulkhead, perUserChatLimiter);
         if (!state.tryAcquirePermit()) {
             throw ApiException.serviceUnavailable("当前对话请求过多，请稍后重试");
         }
@@ -122,7 +132,7 @@ public class ChatController {
             List<MessageRead> history = messages.recent(workspaceId, MESSAGE_CAP);
             long total = messages.countAll(workspaceId);
             SummaryRow summary = summaries.find(workspaceId).orElse(null);
-            messages.insert(workspaceId, "user", payload.message(), null, null);
+            messages.insert(workspaceId, userId, "user", payload.message(), null, null);
             List<StaleFile> stale = staleFiles.changedSince(workspaceId, cutoff);
             ObjectNode request = buildRequest(
                     workspaceId, runId, payload.message(), history, total, summary, stale);
@@ -240,6 +250,7 @@ public class ChatController {
         JsonNode diff = payload.get("diff");
         String operationId = operations.insertProposed(
                 state.workspaceId,
+                state.userId,
                 payload.path("tool").asString(""),
                 payload.path("path").asString(""),
                 arguments != null ? arguments : mapper.createObjectNode(),
@@ -269,7 +280,7 @@ public class ChatController {
         // 与弹性线程的 persist 路径可能并发，不能各写一行（会重复 assistant 行）。
         String assistantId = state.persistOnce(() -> {
             String id = messages.insert(
-                    state.workspaceId, "assistant", content, toolCalls, citations);
+                    state.workspaceId, null, "assistant", content, toolCalls, citations);
             for (JsonNode node : persist.path("trace_nodes")) {
                 JsonNode error = node.get("error");
                 traces.insertNode(state.workspaceId, state.runId, new TraceNodeInput(
@@ -343,7 +354,7 @@ public class ChatController {
     private void persistPartial(ChatTurnState state, String content) {
         ArrayNode toolCalls = state.buildToolCalls(mapper);
         state.persistOnce(() -> messages.insert(
-                state.workspaceId, "assistant", content, toolCalls, state.citations()));
+                state.workspaceId, null, "assistant", content, toolCalls, state.citations()));
     }
 
     private void forward(SseEmitter emitter, String event, String data) {
@@ -366,7 +377,10 @@ public class ChatController {
 
         private final String workspaceId;
         private final String runId;
+        /** 提问的人：写进 messages.user_id 与 operations.proposed_by_user_id。 */
+        private final String userId;
         private final Bulkhead bulkhead;
+        private final PerUserChatLimiter perUserLimiter;
         private final java.util.concurrent.atomic.AtomicBoolean permitReleased =
                 new java.util.concurrent.atomic.AtomicBoolean();
         private final StringBuilder streamed = new StringBuilder();
@@ -376,21 +390,35 @@ public class ChatController {
         private JsonNode citations;
         private boolean persisted;
 
-        ChatTurnState(String workspaceId, String runId, Bulkhead bulkhead) {
+        ChatTurnState(String workspaceId, String runId, String userId, Bulkhead bulkhead,
+                      PerUserChatLimiter perUserLimiter) {
             this.workspaceId = workspaceId;
             this.runId = runId;
+            this.userId = userId;
             this.bulkhead = bulkhead;
+            this.perUserLimiter = perUserLimiter;
         }
 
-        /** 申请一个舱壁许可；满则 false（调用方据此快速拒绝）。 */
+        /**
+         * 申请许可：先占本用户的独占位（每人同时一轮），再占全局舱壁位。
+         * 全局位没拿到就把用户位退回去，否则该用户会被自己的失败请求锁死。
+         */
         boolean tryAcquirePermit() {
-            return bulkhead.tryAcquirePermission();
+            if (!perUserLimiter.tryAcquire(userId)) {
+                return false;
+            }
+            if (!bulkhead.tryAcquirePermission()) {
+                perUserLimiter.release(userId);
+                return false;
+            }
+            return true;
         }
 
-        /** 释放舱壁许可；幂等，所有终态路径都应调用。 */
+        /** 释放两个许可；幂等，所有终态路径都应调用。 */
         void releasePermitOnce() {
             if (permitReleased.compareAndSet(false, true)) {
                 bulkhead.releasePermission();
+                perUserLimiter.release(userId);
             }
         }
 

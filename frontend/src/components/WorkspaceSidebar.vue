@@ -11,9 +11,13 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useAuthStore } from '@/stores/auth'
+import { useRouter } from 'vue-router'
 import { api } from '@/api'
 
 const store = useWorkspaceStore()
+const auth = useAuthStore()
+const router = useRouter()
 const creating = ref(false)
 const newName = ref('')
 const uploading = ref(false)
@@ -77,6 +81,11 @@ async function reindex(fileId: string) {
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
   }
+}
+
+async function logout() {
+  await auth.logout()
+  await router.replace('/login')
 }
 </script>
 
@@ -177,6 +186,16 @@ async function reindex(fileId: string) {
 
     <div v-if="store.health && !store.health.mcp_started" class="health-warning">
       文档工具服务未就绪：{{ store.health.mcp_error }}
+    </div>
+
+    <!-- 当前账号与登出：多用户下"我现在是谁"必须随时可见（否则会误改别人的库） -->
+    <div class="account-footer">
+      <div class="account-meta">
+        <div class="account-name">{{ auth.displayName || auth.user?.email }}</div>
+        <div class="account-role muted">{{ auth.isAdmin ? '管理员' : '成员' }}</div>
+      </div>
+      <a v-if="auth.isAdmin" class="account-link" @click="router.push('/admin/users')">账号管理</a>
+      <a class="account-link" @click="logout">退出</a>
     </div>
 
     <a-modal
@@ -336,5 +355,41 @@ async function reindex(fileId: string) {
   color: var(--danger);
   background: #fef2f2;
   border-top: 1px solid #fecaca;
+}
+
+.account-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.account-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-role {
+  font-size: 11px;
+}
+
+.account-link {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.account-link:hover {
+  color: var(--accent);
 }
 </style>

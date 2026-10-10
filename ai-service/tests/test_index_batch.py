@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from openpyxl import Workbook
 
-from tests.conftest import seed_workspace_file
+from conftest import seed_workspace_file
 
 pytestmark = pytest.mark.anyio
 
