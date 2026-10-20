@@ -79,6 +79,21 @@ def test_unsupported_extension_is_rejected(workspace: Path) -> None:
         sandbox.resolve_document("note.txt")
 
 
+def test_resolve_excel_rejects_a_word_document(workspace: Path) -> None:
+    """Statistics tools are openpyxl-only; a .docx must fail as a type error.
+
+    Handing a Word file to openpyxl produced a ``corrupt_document`` error whose
+    wording ("check you can open it with Excel first") reads like the file is
+    damaged — the agent would then ask the user to re-upload a healthy document.
+    """
+    (workspace / "制度.docx").touch()
+    with pytest.raises(UnsupportedDocument) as excinfo:
+        sandbox.resolve_excel("制度.docx")
+    assert "Excel" in str(excinfo.value)
+    # The workbook path is unaffected by the stricter resolver.
+    assert sandbox.resolve_excel("book.xlsx", must_exist=False).name == "book.xlsx"
+
+
 def test_multiple_roots_are_supported(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

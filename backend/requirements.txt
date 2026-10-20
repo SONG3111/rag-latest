@@ -23,6 +23,26 @@ python-dateutil>=2.9
 # Imported directly for proposal rebasing (formula reference shifting);
 # the MCP subprocess runs from this same package.
 mcp-office-server>=0.1.0
+# Gmail / Google Calendar tools run in a second MCP subprocess. Keeping the
+# package separate from the document sandbox also isolates OAuth credentials.
+mcp-google-server>=0.1.0
+
+# --- Feishu long connection ---
+# Official Lark/Feishu SDK. The bridge is disabled unless app credentials and a
+# user allowlist are configured.
+lark-oapi>=1.7.5
+
+# --- local meeting transcription ---
+# WhisperLiveKit supplies PCM streaming, VAD and LocalAgreement on top of
+# faster-whisper. The model is loaded lazily on the first meeting recording.
+whisperlivekit>=0.2.26,<0.3
+# Keep the scientific stack below NumPy 2 because the office server's yearfrac
+# dependency (used by Excel date/financial formulas) declares numpy<2. New
+# librosa releases also require NumPy 2/Numba 0.61, so pin the compatible trio.
+numpy>=1.26,<2
+numba>=0.60,<0.61
+librosa>=0.10,<0.11
+opencc>=1.4.2,<2
 
 # --- retrieval ---
 qdrant-client>=1.12

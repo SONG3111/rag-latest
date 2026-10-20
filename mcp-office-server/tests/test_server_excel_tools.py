@@ -7,6 +7,7 @@ relative paths, JSON envelopes, structured errors instead of raised exceptions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -220,3 +221,87 @@ def test_unexpected_failures_stay_inside_the_envelope(
     assert payload["ok"] is False
     assert payload["error"]["code"] == "tool_error"
     assert "unexpected failure" in payload["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# statistics tools (read-only)
+# --------------------------------------------------------------------------- #
+def test_describe_column_envelope(workbook_path: Path) -> None:
+    payload = _call("describe_column", path="销售表.xlsx", sheet_name="销售", column="销售额")
+    assert payload["ok"] is True
+    assert payload["data"]["column"] == "销售额"
+    assert payload["data"]["count"] == 3
+    assert payload["data"]["sum"] == 6000
+    assert payload["data"]["mean"] == 2000
+
+
+def test_aggregate_envelope(workbook_path: Path) -> None:
+    payload = _call(
+        "aggregate", path="销售表.xlsx", sheet_name="销售",
+        group_by="区域", value_column="销售额", agg="sum",
+    )
+    assert payload["ok"] is True
+    assert payload["data"]["group_count"] == 3
+    assert payload["data"]["total_value"] == 6000
+    assert payload["data"]["groups"][0] == {"key": "华南", "value": 3000.0, "count": 1}
+
+
+def test_sort_by_envelope(workbook_path: Path) -> None:
+    payload = _call(
+        "sort_by", path="销售表.xlsx", sheet_name="销售",
+        by_column="销售额", descending=True, top_n=1,
+    )
+    assert payload["ok"] is True
+    assert payload["data"]["rows"] == [{"rank": 1, "产品": "C型", "区域": "华南", "销售额": 3000}]
+
+
+def test_statistics_envelopes_report_bad_input(workbook_path: Path) -> None:
+    unknown_column = _call(
+        "describe_column", path="销售表.xlsx", sheet_name="销售", column="不存在的列"
+    )
+    assert unknown_column["ok"] is False
+    assert unknown_column["error"]["code"] == "column_not_found"
+    # 可用列名列在错误里，模型可以照着纠正
+    assert "销售额" in unknown_column["error"]["message"]
+
+    unknown_sheet = _call(
+        "aggregate", path="销售表.xlsx", sheet_name="不存在", group_by="区域"
+    )
+    assert unknown_sheet["ok"] is False
+    assert unknown_sheet["error"]["code"] == "sheet_not_found"
+
+
+def test_statistics_tools_are_annotated_read_only() -> None:
+    """Read-only is what keeps these tools out of the approval gate.
+
+    ``ToolProfile.requires_approval`` is ``not read_only``, so a missing
+    ``readOnlyHint`` would silently turn every statistics call into a document
+    mutation awaiting user approval.
+    """
+    names = {"describe_column", "aggregate", "sort_by"}
+    tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+    for name in names:
+        assert name in tools
+        annotations = tools[name].annotations
+        assert annotations is not None and annotations.readOnlyHint is True
+
+
+def test_statistics_tools_reject_word_documents(
+    workbook_path: Path, word_path: Path
+) -> None:
+    """Regression: a .docx used to come back as ``corrupt_document``.
+
+    That code and its "check you can open it with Excel first" wording read as
+    "your file is damaged", which is how a healthy Word document ends up being
+    reported to the user as corrupt. The type mismatch is now named explicitly.
+    """
+    cases = (
+        ("describe_column", {"sheet_name": "销售", "column": "销售额"}),
+        ("aggregate", {"sheet_name": "销售", "group_by": "区域"}),
+        ("sort_by", {"sheet_name": "销售", "by_column": "销售额"}),
+    )
+    for tool_name, kwargs in cases:
+        payload = _call(tool_name, path="制度.docx", **kwargs)
+        assert payload["ok"] is False, tool_name
+        assert payload["error"]["code"] == "unsupported_document", tool_name
+        assert "Word" in payload["error"]["message"]

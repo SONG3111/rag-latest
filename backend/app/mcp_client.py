@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -87,6 +88,37 @@ def build_server_params(
     )
 
 
+def build_google_server_params(settings: Settings | None = None) -> StdioServerParameters:
+    """Describe the Gmail/Calendar MCP subprocess.
+
+    The Google package is installed beside the office package but launched as a
+    separate stdio process. That isolates OAuth credentials from the document
+    sandbox and lets either capability fail without taking down the other.
+    """
+    settings = settings or get_settings()
+    if settings.google_mcp_server_command:
+        argv = shlex.split(settings.google_mcp_server_command, posix=False)
+        argv = [item.strip("\"'") for item in argv]
+        command, args = argv[0], argv[1:]
+    else:
+        command, args = sys.executable, ["-m", "mcp_google_server.server"]
+    env = {
+        "GOOGLE_TOKEN_PATH": str(settings.effective_google_token_path),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUNBUFFERED": "1",
+    }
+    if settings.effective_google_client_secrets_path is not None:
+        env["GOOGLE_CLIENT_SECRETS_PATH"] = str(
+            settings.effective_google_client_secrets_path
+        )
+    return StdioServerParameters(
+        command=command,
+        args=args,
+        env=env,
+        cwd=str(PROJECT_ROOT),
+    )
+
+
 class McpOfficeClient:
     """Owns one long-lived MCP session and exposes its tools to LangGraph."""
 
@@ -112,7 +144,7 @@ class McpOfficeClient:
 
         stack = AsyncExitStack()
         try:
-            params = build_server_params(self.settings, self.workspace_root)
+            params = self.server_params()
             read, write = await stack.enter_async_context(stdio_client(params))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
@@ -132,6 +164,10 @@ class McpOfficeClient:
             len(tools),
             sum(1 for profile in self._profiles.values() if profile.requires_approval),
         )
+
+    def server_params(self) -> StdioServerParameters:
+        """The process definition used by ``start``; subclasses may replace it."""
+        return build_server_params(self.settings, self.workspace_root)
 
     async def stop(self) -> None:
         if self._exit_stack is not None:
@@ -211,6 +247,13 @@ class McpOfficeClient:
         # Unknown tools are gated: failing closed is the only safe default for a
         # tool that can touch a user's files.
         return True if profile is None else profile.requires_approval
+
+
+class McpGoogleClient(McpOfficeClient):
+    """MCP client for the Gmail/Calendar subprocess."""
+
+    def server_params(self) -> StdioServerParameters:
+        return build_google_server_params(self.settings)
 
 
 async def load_tools_once(settings: Settings | None = None) -> list[BaseTool]:

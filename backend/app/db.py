@@ -62,12 +62,19 @@ def init_db() -> None:
     version of the code.
     """
     from . import models  # noqa: F401  (side effect: register mappers)
-    from .migrations import apply_additive_migrations
+    from .migrations import (
+        apply_additive_migrations,
+        dedupe_meeting_segments,
+        normalize_legacy_timestamps,
+    )
 
     Base.metadata.create_all(bind=engine)
     applied = apply_additive_migrations(engine)
+    normalized = normalize_legacy_timestamps(engine)
+    applied.extend(normalized)
+    applied.extend(dedupe_meeting_segments(engine))
     if applied:
-        logger.info("applied %d schema migration(s): %s", len(applied), ", ".join(applied))
+        logger.info("applied %d migration step(s): %s", len(applied), ", ".join(applied))
 
 
 def get_session() -> Iterator[Session]:

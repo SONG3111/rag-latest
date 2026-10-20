@@ -63,10 +63,15 @@ from .prompts import (
     history_summary_notice,
     stale_files_notice,
 )
+from .analysis_prompts import ANALYSIS_TOOL_DESCRIPTION
 
 logger = logging.getLogger(__name__)
 
 KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
+
+# Delegation tool: the main agent owns the conversation, the sub-agent owns the
+# statistics. One call hands over the whole "analyse this and write a report" task.
+ANALYSIS_TOOL_NAME = "analyze_and_report"
 
 # A value (two or more digits, or a markdown table) inside a statement about documents
 # is the signature of an answer that is quoting file content. Two digits rather than
@@ -107,6 +112,10 @@ _TOOL_ERROR_HINTS: dict[str | None, str] = {
     "sheet_exists": (
         "同名工作表已存在。请换一个名称，或先确认是否要在现有工作表上操作。"
     ),
+    "column_not_found": (
+        "列名/列号不对。error.message 里列出了该表头行可用的列名，"
+        "请先用 get_doc_structure 确认表头，再用其中的名字或列字母重试。"
+    ),
     "last_sheet": (
         "工作簿至少要保留一个工作表，最后一张表不能删除。"
         "如需清空内容，请用 update_cells 逐格清值。"
@@ -120,6 +129,11 @@ _TOOL_ERROR_HINTS: dict[str | None, str] = {
     "invalid_arguments": "参数不完整或类型不对。请对照该工具的参数说明修正后重试。",
     "unstructured_result": "工具执行出现意外错误。请检查参数后重试；如反复失败，请向用户说明。",
     "corrupt_document": "文件无法解析，可能已损坏。请告知用户重新上传。",
+    "unsupported_document": (
+        "该工具只读 Excel（.xlsx/.xlsm），不能用于 Word 文档。"
+        "Word 内容请改用 get_doc_structure / read_paragraphs / read_table；"
+        "文件本身是好的，不要告诉用户文件损坏或要求重新上传。"
+    ),
     "tool_failed": "工具执行失败。请检查参数后重试；如反复失败，请向用户说明原因。",
     None: "工具执行失败。请检查参数后重试；如反复失败，请向用户说明原因。",
 }
@@ -186,8 +200,87 @@ DOCUMENT_HINT_PATTERN = re.compile(
 )
 
 
+def _focus_file_names(value: str | list[str] | None) -> list[str]:
+    """Normalize the optional "which files" hint into a list of names.
+
+    The parameter is declared as ``str | list[str]`` on purpose: live testing had the
+    model emit a single string (or a delimited one) instead of a JSON array, and the
+    resulting schema rejection cost two identical retries before the delegation could
+    even start. Accepting both shapes and splitting here keeps a well-meant hint from
+    failing the whole call.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[,，、;；\s]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        parts = [str(item) for item in value]
+    else:
+        return []
+    return [part.strip() for part in parts if part.strip()]
+
+
 class ToolProposalError(RuntimeError):
     """Raised when a proposed write cannot be turned into an approval request."""
+
+
+def build_knowledge_tool(
+    session: Session,
+    workspace_id: str,
+    settings: Settings,
+    owner,
+) -> BaseTool:
+    """Build the hybrid-retrieval tool for one agent.
+
+    ``owner`` supplies the per-turn context retrieval needs, through two
+    read-only attributes: ``history`` (recent turns, used to resolve elliptical
+    follow-up questions during query rewriting) and ``trace`` (the optional run
+    tracer). Both the workspace agent and the read-only analysis sub-agent build
+    this same tool, so retrieval behaves identically wherever it is called from.
+    """
+
+    def _search(query: str, top_k: int = 5) -> str:
+        retriever = Retriever(session, workspace_id, settings)
+        hits = retriever.search(
+            query, top_k=top_k, history=owner.history, trace=owner.trace
+        )
+        run = retriever.last_run
+        meta = {
+            "original_query": run.original_query,
+            "effective_query": run.effective_query,
+            "rewritten": run.rewritten,
+            "relevance_threshold": run.threshold_applied,
+        }
+        if not hits:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "results": [],
+                        "retrieval": meta,
+                        "note": (
+                            "知识库中没有找到相关内容。"
+                            "请直接告诉用户没有找到，不要用常识或推测补充答案。"
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            )
+        payload = {
+            "results": [hit.to_reference() for hit in hits],
+            "retrieval": meta,
+            "note": (
+                "score 是交叉编码器算出的相关性分数（0-1）。"
+                "分数普遍偏低说明知识库可能没有答案，此时应如实说明而不是猜测。"
+            ),
+        }
+        return json.dumps({"ok": True, "data": payload}, ensure_ascii=False)
+
+    return StructuredTool.from_function(
+        func=_search,
+        name=KNOWLEDGE_TOOL_NAME,
+        description=KNOWLEDGE_TOOL_DESCRIPTION,
+    )
 
 
 class AgentState(TypedDict):
@@ -233,6 +326,8 @@ def _summarize_tool_call(name: str, args: dict[str, Any]) -> str:
     """Human-readable label shown while the agent is working."""
     if name == KNOWLEDGE_TOOL_NAME:
         return f"正在检索知识库：{args.get('query', '')}"
+    if name == ANALYSIS_TOOL_NAME:
+        return f"正在分析数据并生成报告：{str(args.get('request', ''))[:40]}"
     if name == "list_files":
         return "正在查看工作区文件"
     if name == "get_doc_structure":
@@ -301,6 +396,16 @@ class WorkspaceAgent:
             self._llm = build_resilient_chat_model(self.settings)
         return self._llm
 
+    @property
+    def history(self) -> list[str]:
+        """Recent turns rendered for query rewriting (read by the retrieval tool)."""
+        return self._history
+
+    @property
+    def trace(self):
+        """Active run tracer, or None when tracing is off."""
+        return self._trace
+
     def _open_span(self, node: str, input_summary: dict[str, Any] | None = None):
         """Trace span when a collector is installed, else a no-op record dict."""
         if self._trace is None:
@@ -309,56 +414,86 @@ class WorkspaceAgent:
 
     def _knowledge_tool(self) -> BaseTool:
         """Wrap retrieval as a tool so the agent decides when to search."""
-        session = self.session
-        workspace_id = self.workspace.id
-        settings = self.settings
+        return build_knowledge_tool(self.session, self.workspace.id, self.settings, self)
+
+    def _analysis_tool(self) -> BaseTool:
+        """Expose the data-analysis sub-agent as one tool (agent-as-tool).
+
+        The sub-agent runs to completion inside this call and hands back its
+        report; nothing here streams, so the parent turn still looks like a
+        single tool call followed by the answer.
+
+        The parameter is deliberately named ``focus_files``: parameters named
+        ``path``/``filepath`` are rewritten by ``_prefix_tool_paths``, and these
+        names are workspace-relative hints the sub-agent resolves itself.
+        """
+        # Imported lazily: analysis.py imports this module's shared helpers, so a
+        # module-level import would be circular.
+        from .analysis import DataAnalysisAgent
+
         agent = self
 
-        def _search(query: str, top_k: int = 5) -> str:
-            retriever = Retriever(session, workspace_id, settings)
-            hits = retriever.search(
-                query, top_k=top_k, history=agent._history, trace=agent._trace
+        async def _analyze(
+            request: str, focus_files: str | list[str] | None = None
+        ) -> str:
+            prompt = request.strip()
+            names = _focus_file_names(focus_files)
+            if names:
+                prompt = f"{prompt}\n\n（只分析这些文件：{'、'.join(names)}）"
+            sub_agent = DataAnalysisAgent(
+                agent.session,
+                agent.workspace,
+                agent.client,
+                agent.settings,
+                llm=agent._llm,
+                history=agent._history,
+                trace=agent._trace,
             )
-            run = retriever.last_run
-            meta = {
-                "original_query": run.original_query,
-                "effective_query": run.effective_query,
-                "rewritten": run.rewritten,
-                "relevance_threshold": run.threshold_applied,
-            }
-            if not hits:
+            result = await sub_agent.arun(prompt)
+            if not result.report.strip():
+                # An empty report would leave the main agent with nothing to relay
+                # but a plausible-sounding sentence it made up itself.
                 return json.dumps(
                     {
-                        "ok": True,
-                        "data": {
-                            "results": [],
-                            "retrieval": meta,
-                            "note": (
-                                "知识库中没有找到相关内容。"
-                                "请直接告诉用户没有找到，不要用常识或推测补充答案。"
+                        "ok": False,
+                        "error": {
+                            "code": "analysis_failed",
+                            "message": (
+                                "数据分析未能生成报告（可能没找到可用数据或循环超限）。"
+                                "请如实告知用户分析未完成，不要自行编造结论。"
                             ),
                         },
                     },
                     ensure_ascii=False,
                 )
-            payload = {
-                "results": [hit.to_reference() for hit in hits],
-                "retrieval": meta,
-                "note": (
-                    "score 是交叉编码器算出的相关性分数（0-1）。"
-                    "分数普遍偏低说明知识库可能没有答案，此时应如实说明而不是猜测。"
-                ),
-            }
-            return json.dumps({"ok": True, "data": payload}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "report": result.report,
+                        "citations": result.citations,
+                        "steps": result.steps,
+                        "note": (
+                            "请把 report 的内容原样作为你的最终回答呈现给用户，"
+                            "可加一句引导语；不要改写其中的数值、表格或结论。"
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            )
 
         return StructuredTool.from_function(
-            func=_search,
-            name=KNOWLEDGE_TOOL_NAME,
-            description=KNOWLEDGE_TOOL_DESCRIPTION,
+            coroutine=_analyze,
+            name=ANALYSIS_TOOL_NAME,
+            description=ANALYSIS_TOOL_DESCRIPTION,
         )
 
     def build_tools(self) -> list[BaseTool]:
         tools: list[BaseTool] = [self._knowledge_tool()]
+        if self.settings.analysis_tool_enabled:
+            # Read-only, like retrieval: never masked by the intent gate and never
+            # wrapped in a proposal proxy, so it stays available on query turns.
+            tools.append(self._analysis_tool())
         self._gated_write_names: set[str] = set()
         for tool in self.client.tools():
             if self.client.requires_approval(tool.name):
@@ -631,6 +766,16 @@ class WorkspaceAgent:
                             ).to_citation()
                         )
 
+                if name == ANALYSIS_TOOL_NAME and payload.get("ok"):
+                    # The sub-agent's report carries the citations behind it; merging
+                    # them here keeps the citation panel working for report sources
+                    # exactly as it does for a retrieval-grounded answer.
+                    citations.extend(
+                        item
+                        for item in (data or {}).get("citations") or []
+                        if isinstance(item, dict)
+                    )
+
                 if isinstance(data, dict) and data.get("status") == "pending_user_approval":
                     proposals.append({
                         "operation_id": data.get("operation_id"),
@@ -644,12 +789,13 @@ class WorkspaceAgent:
                 # context (deepseek-harness packages/spill): the model keeps a
                 # preview plus retrieval guidance instead of the full text.
                 # Citations and proposals were already extracted from the full
-                # payload above, so they stay complete. Pending approvals are
-                # never spilled — their envelope is the model's only view of
-                # the operation it is asked to describe.
+                # payload above, so they stay complete. Pending approvals and the
+                # analysis report are never spilled — their envelope is the model's
+                # only view of what it is asked to relay.
                 if (
                     isinstance(data, dict)
                     and data.get("status") != "pending_user_approval"
+                    and name != ANALYSIS_TOOL_NAME
                 ):
                     spilled = spill_tool_result(
                         name,

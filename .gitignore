@@ -12,9 +12,13 @@ dist/
 
 # --- secrets ---
 .env
+client_secret*.json
+.credentials/
 
 # --- runtime data ---
 data/
+data-demo-logging/
+*.pre-epoch-normalize-*.bak
 *.log
 eval-*.json
 eval-*.txt
@@ -27,6 +31,7 @@ Thumbs.db
 
 # --- tooling ---
 .mimosa/
+.trae/
 .zcode/
 wid_tmp.txt
 

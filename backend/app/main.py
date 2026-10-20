@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,9 +10,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .assistant.feishu import FeishuBridge
+from .assistant.routes import router as assistant_router
+from .assistant.service import recover_interrupted_actions
 from .config import get_settings
-from .db import init_db
-from .mcp_client import McpOfficeClient, McpStartupError
+from .db import init_db, session_scope
+from .meeting.asr import WhisperLiveKitTranscriber
+from .meeting.routes import router as meeting_router
+from .meeting.service import recover_interrupted_meetings
+from .mcp_client import McpGoogleClient, McpOfficeClient, McpStartupError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +32,22 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_directories()
     init_db()
+    if settings.assistant_enabled:
+        with session_scope() as session:
+            recovered = recover_interrupted_actions(session)
+        if recovered:
+            logger.warning(
+                "marked %d interrupted assistant action(s) as failed", recovered
+            )
+    if settings.meeting_enabled:
+        with session_scope() as session:
+            interrupted, summaries = recover_interrupted_meetings(session)
+        if interrupted or summaries:
+            logger.warning(
+                "meeting recovery: %d interrupted recording(s), %d summary job(s)",
+                interrupted,
+                summaries,
+            )
     logger.info("database ready at %s", settings.effective_database_url)
     _warn_about_legacy_chunks()
 
@@ -40,9 +63,51 @@ async def lifespan(app: FastAPI):
         app.state.mcp_error = None
     app.state.mcp_client = client
 
+    google_client = McpGoogleClient(settings)
+    if settings.assistant_enabled:
+        try:
+            await google_client.start()
+        except McpStartupError as exc:
+            logger.error("Google MCP server unavailable: %s", exc)
+            app.state.google_mcp_error = str(exc)
+        else:
+            app.state.google_mcp_error = None
+    else:
+        app.state.google_mcp_error = "assistant disabled"
+    app.state.google_mcp_client = google_client
+
+    # The ASR engine is lazy: constructing this adapter does not import or load
+    # Whisper until the first recording starts.
+    app.state.meeting_transcriber = WhisperLiveKitTranscriber(settings)
+
+    bridge = FeishuBridge(settings, google_client=google_client)
+    app.state.feishu_bridge = bridge
+    if (
+        settings.assistant_enabled
+        and google_client.started
+        and settings.effective_google_token_path.exists()
+    ):
+        try:
+            bridge.start(asyncio.get_running_loop())
+        except Exception as exc:
+            app.state.feishu_error = str(exc)
+            logger.error("Feishu bridge failed to start: %s", exc)
+        else:
+            app.state.feishu_error = bridge.last_error
+    else:
+        app.state.feishu_error = (
+            "assistant disabled"
+            if not settings.assistant_enabled
+            else ("Google MCP is unavailable" if not google_client.started else None)
+        )
+
     try:
         yield
     finally:
+        if google_client.started:
+            await google_client.stop()
+        # Close in reverse order of startup: stdio_client uses anyio cancel
+        # scopes, which must unwind LIFO within the lifespan task.
         await client.stop()
         from .retrieval.vector_store import close_client
 
@@ -69,15 +134,35 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+    app.include_router(assistant_router)
+    app.include_router(meeting_router)
 
     @app.get("/health")
     def health() -> dict:
         client = getattr(app.state, "mcp_client", None)
+        google = getattr(app.state, "google_mcp_client", None)
+        bridge = getattr(app.state, "feishu_bridge", None)
+        meeting = getattr(app.state, "meeting_transcriber", None)
+        settings = get_settings()
         return {
             "status": "ok",
             "mcp_started": bool(client and client.started),
             "mcp_error": getattr(app.state, "mcp_error", None),
             "tools": len(client.profiles()) if client and client.started else 0,
+            "assistant": {
+                "enabled": settings.assistant_enabled,
+                "google_mcp_started": bool(google and google.started),
+                "google_auth_ready": settings.effective_google_token_path.exists(),
+                "google_error": getattr(app.state, "google_mcp_error", None),
+                "feishu_configured": settings.feishu_configured,
+                "feishu_connected": bool(bridge and bridge.connected),
+                "feishu_error": getattr(app.state, "feishu_error", None),
+            },
+            "meeting": (
+                meeting.health()
+                if meeting is not None
+                else {"enabled": settings.meeting_enabled, "ready": False}
+            ),
         }
 
     return app

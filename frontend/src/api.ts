@@ -1,8 +1,15 @@
 import type {
+  AssistantAction,
+  AssistantHealth,
+  AssistantMessage,
+  AssistantTool,
   CitationPreview,
   DocumentFile,
   IndexingResult,
   McpTool,
+  MeetingDetail,
+  MeetingHealth,
+  MeetingListItem,
   Operation,
   StoredMessage,
   Workspace,
@@ -102,4 +109,61 @@ export const api = {
     }),
 
   health: () => request<{ status: string; mcp_started: boolean; tools: number; mcp_error: string | null }>('/health'),
+
+  assistantHealth: () => request<AssistantHealth>('/api/assistant/health'),
+
+  listAssistantMessages: () =>
+    request<AssistantMessage[]>('/api/assistant/messages'),
+
+  listAssistantActions: () =>
+    request<AssistantAction[]>('/api/assistant/actions'),
+
+  listAssistantTools: () =>
+    request<AssistantTool[]>('/api/assistant/tools'),
+
+  applyAssistantAction: (actionId: string) =>
+    request<AssistantAction>(`/api/assistant/actions/${actionId}/apply`, {
+      method: 'POST',
+    }),
+
+  rejectAssistantAction: (actionId: string) =>
+    request<AssistantAction>(`/api/assistant/actions/${actionId}/reject`, {
+      method: 'POST',
+    }),
+
+  meetingHealth: () => request<MeetingHealth>('/api/meetings/health'),
+
+  listMeetings: () => request<MeetingListItem[]>('/api/meetings'),
+
+  createMeeting: (title: string, language: 'zh' | 'en' | 'auto') =>
+    request<MeetingDetail>('/api/meetings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, language }),
+    }),
+
+  getMeeting: (meetingId: string) =>
+    request<MeetingDetail>(`/api/meetings/${meetingId}`),
+
+  updateMeeting: (
+    meetingId: string,
+    payload: { title?: string; notes?: string; language?: 'zh' | 'en' | 'auto' },
+  ) =>
+    request<MeetingDetail>(`/api/meetings/${meetingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteMeeting: (meetingId: string) =>
+    request<void>(`/api/meetings/${meetingId}`, { method: 'DELETE' }),
+
+  generateMeetingMinutes: (meetingId: string) =>
+    request<{ meeting_id: string; summary_status: string }>(
+      `/api/meetings/${meetingId}/minutes`,
+      { method: 'POST' },
+    ),
+
+  meetingExportUrl: (meetingId: string) =>
+    `${BASE}/meetings/${meetingId}/export.md`,
 }

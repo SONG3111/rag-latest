@@ -17,6 +17,7 @@
 - **人机确认闭环**：写入类工具不会直接执行，先生成变更提案与逐项 Diff，确认后才写入，写入前自动备份。
 - **工作区隔离**：每个工作区是磁盘上一个独立目录，Agent 的所有路径都锁在沙箱内。
 - **工具可见**：界面上能看到 Agent 正在调用哪个工具，以及当前启用的完整工具清单与审批级别。
+- **会议助手**：同时采集麦克风与系统声音，本地流式转写，停止后生成带时间戳的结构化纪要，并支持基于转写追问和 Markdown 导出。
 
 ## 架构
 
@@ -125,6 +126,9 @@ LangChain 并不会透出（`additional_kwargs` 为空），无法显示给用�
 | Embedding | **本地** `BAAI/bge-m3`（1024 维） | 权重在本地，建索引不出网 |
 | Reranker | **本地** `BAAI/bge-reranker-v2-m3` | 交叉编码器，本地推理 |
 | 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 22 个工具（7 只读 + 15 写入需审批） |
+| 邮件 / 日程工具 | 独立 `mcp-google-server`（Gmail API + Calendar API），stdio | 5 个只读 + 4 个写入需审批 |
+| 消息入口 | 飞书官方 `lark-oapi` WebSocket 长连接 | 无需公网回调；白名单用户与群 |
+| 会议转写 | `WhisperLiveKit` + `faster-whisper` | 本地 PCM 流式 ASR；音频不落盘 |
 | 向量库 | Qdrant local（嵌入式） | 每个工作区一个 collection |
 | 关系库 | SQLite | 工作区 / 文件 / 消息 / 操作审计 |
 
@@ -182,8 +186,9 @@ huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir C:/code/agent/rag/m
 ```bash
 # 用独立环境（推荐 Python 3.12）
 conda create -p .venv312 python=3.12 -y
-./.venv312/python.exe -m pip install -r backend/requirements.txt
 ./.venv312/python.exe -m pip install -e ./mcp-office-server
+./.venv312/python.exe -m pip install -e ./mcp-google-server
+./.venv312/python.exe -m pip install -r backend/requirements.txt
 
 # 启动（Windows）
 $env:PYTHONPATH = "backend"; ./.venv312/python.exe -m uvicorn app.main:app --reload
@@ -231,6 +236,87 @@ python scripts/make_demo_data.py
 4. 让 Agent 把这些记录的状态改成"需总经理审批" → 右侧出现 Diff 卡片，**确认前文件不会变动**
 5. 点"应用修改" → 写入文件并自动备份，可随时还原
 
+## 邮件助手（Gmail + Google Calendar + 飞书）
+
+顶部切换到“邮件助手”后，可以搜索/阅读 Gmail、准备回复草稿、查询空闲时间并创建会议。
+飞书机器人使用官方 SDK 的长连接接收文字指令；保存草稿、发送邮件、创建会议都会先落成
+持久化提案，在 Web 或飞书卡片中批准后才真正调用 Google API。
+
+V1 没有使用 A2A。A2A 解决的是独立 Agent 之间的发现与任务委派；这里是单 Agent 使用工具，
+主流且更简单的组合是 **MCP（工具）+ WebSocket/Webhook（消息入口）+ REST/SSE（UI）+
+数据库审批记录 + LangGraph（编排）**。以后需要跨服务 Agent 协作时，再在外部加 A2A 网关。
+
+### Google 授权
+
+1. 在 Google Cloud Console 创建 OAuth 客户端，类型选 **Desktop app**。
+2. 启用 Gmail API 与 Google Calendar API。
+3. 配置 `.env` 并执行一次性授权：
+
+```powershell
+$env:GOOGLE_CLIENT_SECRETS_PATH="C:\path\to\client_secret.json"
+$env:GOOGLE_TOKEN_PATH="C:\Users\songqulv\Desktop\notion\rag-latest\data\secrets\google_token.json"
+./.venv312/python.exe -m mcp_google_server.auth
+```
+
+令牌只保存在 `data/secrets/`（已忽略），不会提交仓库。权限限定为 Gmail 只读/草稿/发送
+和 Calendar 只读/事件。V1 不支持附件、新外发邮件、转发、改期或取消日程。
+
+### 飞书长连接
+
+在飞书开放平台创建自建应用，启用机器人、长连接与以下权限/事件，然后填写 `.env`：
+
+- 事件：`im.message.receive_v1`
+- 回调：`card.action.trigger`
+- 变量：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOWED_OPEN_IDS`
+- 可选：`FEISHU_ALLOWED_CHAT_IDS` 限制群；`FEISHU_APPROVER_OPEN_IDS` 指定审批人
+
+用户白名单为空时桥接不会启动（失败关闭，不会解释为“允许所有人”）。只支持文字指令，
+不后台轮询邮箱，也不会主动监听新邮件。
+
+## 会议助手（实时录音 + 本地转写）
+
+顶部切换到“会议助手”后，新建一场会议并点击“开始录音”。浏览器会同时请求：
+
+- 麦克风权限；
+- 屏幕或标签页共享权限，并且在共享弹窗中勾选“分享系统音频”。
+
+音频由 `AudioWorklet` 转为 16kHz 单声道 PCM，经 WebSocket 送到
+`WhisperLiveKit`/`faster-whisper` 做本地流式转写。停止录音后，系统自动生成：
+
+- 会议摘要；
+- 关键结论与决策；
+- 行动项（负责人、截止时间、依据时间戳）；
+- 风险与待确认；
+- 讨论要点。
+
+会后可以继续追问“谁负责上线”“还有哪些风险没确认”。回答只使用当前会议的转写与笔记，
+并尽量附 `[H:MM:SS]` 依据。整个会议可导出为 Markdown。
+
+实时转写统一经过 OpenCC 繁转简；同一个句子的中间版本只更新原行，不再产生多条
+时间戳相同、文本不断变长的重复记录。录音栏会展示模型加载状态和本地处理延迟。
+麦克风负责你的声音，系统声音负责会议中其他人的声音；双源同时开启时建议使用耳机，
+避免外放声音被麦克风再次采集。
+
+```powershell
+# 安装新增的本地转写依赖（首次安装体积较大）
+./.venv312/python.exe -m pip install -r backend/requirements.txt
+
+# 启动后打开 http://localhost:5173，切换到“会议助手”
+```
+
+首次录音会下载 `small` Whisper 模型，可能需要等待。默认使用 CPU int8、beam=2 和
+15 秒缓冲窗口，在延迟与长句完整性之间取平衡；如有兼容的
+CUDA/CTranslate2 环境，可通过 `MEETING_ASR_DEVICE=cuda` 和
+`MEETING_ASR_COMPUTE_TYPE=float16` 切换。建议使用最新版 Chrome/Edge 和耳机，
+减少系统声音被麦克风二次采集。
+
+简体中文由 OpenCC 后处理保证，不向 Whisper 注入“请使用简体中文”等自然语言指令；
+这类文字可能被模型当作上下文复制进转写结果。
+
+原始音频只在浏览器与后端内存中流转，不写入磁盘。转写文本、笔记和纪要保存在本地 SQLite；
+生成纪要与追问时，转写会发送给当前配置的云端模型。若某个会议中断，已确认的转写仍会保留，
+可以直接重新生成纪要。
+
 ## 项目结构
 
 ```
@@ -242,9 +328,18 @@ python scripts/make_demo_data.py
 │   │   ├── word_ops.py       # python-docx 实现层（含跨 run 替换）
 │   │   └── errors.py         # 统一错误语义
 │   └── tests/
+├── mcp-google-server/        # 独立 MCP 服务：Gmail / Google Calendar
+│   ├── src/mcp_google_server/
+│   │   ├── server.py         # 9 个工具及只读/审批注解
+│   │   ├── gmail_ops.py      # 搜索、MIME 正文、线程回复与草稿
+│   │   ├── calendar_ops.py   # 日程、free/busy、空闲时段、创建会议
+│   │   └── auth.py           # 本地 OAuth Desktop App 流程
+│   └── tests/
 ├── backend/
 │   ├── app/
 │   │   ├── agent/graph.py    # LangGraph 图 + 工具门控
+│   │   ├── assistant/        # 邮件助手图、审批执行器、飞书长连接
+│   │   ├── meeting/          # 实时 ASR、纪要与会议转写追问
 │   │   ├── mcp_client.py     # MCP 子进程生命周期 + 注解解析
 │   │   ├── retrieval/        # 分块 / BM25 / 向量库 / RRF 管线
 │   │   ├── services/         # 文件入库、备份、审批操作
@@ -283,14 +378,17 @@ python scripts/make_demo_data.py
 # 检查 SSE 原始字节的行尾（CRLF vs LF），用于排查事件丢失
 ./.venv312/python.exe scripts/inspect_sse_bytes.py
 
-# 前端：SSE 帧解析回归 + 对接真实服务器的流式检查
-cd frontend && npm run check:sse && npm run check:sse:live
+# 前端：SSE 帧解析、会议 PCM 降采样回归 + 对接真实服务器的流式检查
+cd frontend && npm run check:sse && npm run check:meeting-pcm && npm run check:sse:live
 
 # 真实 HTTP 端到端：起服务器 → 上传 → 提问 → 拒答，走完整 SSE 链路
 ./.venv312/python.exe scripts/check_chat_http.py
 
 # MCP 服务：沙箱与文档读写
 ./.venv312/python.exe -m pytest mcp-office-server/tests -q
+
+# Google MCP：Gmail MIME、回复线程、空闲时间、事件创建（fake Google API）
+./.venv312/python.exe -m pytest mcp-google-server/tests -q
 
 # 后端：检索、审批闭环、Agent 门控、HTTP 端到端
 ./.venv312/python.exe -m pytest backend/tests -q
@@ -308,6 +406,7 @@ cd frontend && npm run check:sse && npm run check:sse:live
 - **相关性门控**：低于阈值全部过滤后返回空、阈值 0 时不生效、无重排分数时不误卡
 - **查询改写**：改写结果同时作用于向量与关键词两路、对话历史传入改写器、关闭时零模型调用、失败与异常输出回退原查询
 - **审批闭环**：提案不落盘、拒绝后文件字节不变、应用前备份、重复应用被拒、还原生效
+- **邮件助手**：读工具直通、写工具只生成提案、批准只执行一次、过期/重复批准被拒、飞书白名单与卡片回调
 - **Agent 门控**：只读工具直通、写入工具被拦截、提案携带 Diff、未知工具不崩溃、迭代上限生效
 - **本地模型**：维度与配置一致、语义相近文本余弦相似度更高、重排把依据条款排到第一位
 - **端到端**：建工作区 → 上传 Excel+Word → 索引 → 工具清单 → 删除
@@ -323,6 +422,19 @@ cd frontend && npm run check:sse && npm run check:sse:live
 | `POST` | `/api/workspaces/{id}/chat/stream` | 对话，SSE 事件 `token / tool_call / tool_result / proposal / citations / done / error` |
 | `POST` | `/api/workspaces/{id}/operations/{op}/apply|reject|revert` | 审批闭环 |
 | `GET` | `/api/workspaces/{id}/tools` | MCP 工具清单及其审批级别 |
+| `POST` | `/api/assistant/chat/stream` | 邮件助手 SSE 对话，事件 `token / tool_call / tool_result / proposal / done / error` |
+| `GET` | `/api/assistant/messages` | 网页会话历史 |
+| `GET` | `/api/assistant/actions` | 待审批与历史操作（可按状态筛选） |
+| `POST` | `/api/assistant/actions/{id}/apply|reject` | 批准/拒绝 Google 写入 |
+| `GET` | `/api/assistant/tools` | Gmail/Calendar 工具及审批级别 |
+| `GET` | `/api/assistant/health` | Google MCP、OAuth、飞书连接与待审批数量 |
+| `GET/POST` | `/api/meetings` | 会议列表 / 新建会议 |
+| `GET/PATCH/DELETE` | `/api/meetings/{id}` | 会议详情、标题/笔记更新、删除 |
+| `WS` | `/api/meetings/{id}/audio` | 16kHz PCM 音频流与实时转写事件 |
+| `POST` | `/api/meetings/{id}/minutes` | 启动会后纪要生成 |
+| `POST` | `/api/meetings/{id}/chat/stream` | 基于本场转写的 SSE 追问 |
+| `GET` | `/api/meetings/{id}/export.md` | 导出完整会议 Markdown |
+| `GET` | `/api/meetings/health` | 本地 ASR 模型、设备与加载状态 |
 
 Agent 的工具选择测试用脚本化的假模型驱动，因此**不需要 API key** 也能验证控制流。
 
@@ -438,6 +550,30 @@ python scripts/eval_retrieval.py --dense --sweep      # 阈值扫描
 | `QUERY_REWRITE_HISTORY_TURNS` | `4` | 改写时参考的历史轮数 |
 | `QUERY_REWRITE_TIMEOUT` | `45` | 改写超时；实测耗时 4~8s，上限留足余量 |
 | `AGENT_MAX_ITERATIONS` | `12` | 工具循环上限 |
+| `ASSISTANT_MODEL` | 空 | 邮件助手模型；空则复用 `LLM_MODEL` 与备用模型链 |
+| `ASSISTANT_MAX_ITERATIONS` | `8` | 邮件助手工具循环上限 |
+| `ASSISTANT_ACTION_TTL_HOURS` | `24` | 待审批提案过期时间 |
+| `ASSISTANT_TIMEZONE` | `Asia/Shanghai` | 日程与相对日期默认时区 |
+| `GOOGLE_TOKEN_PATH` | `data/secrets/google_token.json` | Google OAuth 令牌文件 |
+| `GOOGLE_CLIENT_SECRETS_PATH` | 空 | OAuth Desktop App 客户端配置，仅授权命令使用 |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 空 | 飞书自建应用凭证；为空则桥接停用 |
+| `FEISHU_ALLOWED_OPEN_IDS` | 空 | 允许发指令的用户 open_id，逗号分隔 |
+| `FEISHU_ALLOWED_CHAT_IDS` | 空 | 可选群白名单；为空表示允许白名单用户所在任意群 |
+| `FEISHU_APPROVER_OPEN_IDS` | 空 | 飞书审批人；为空时沿用用户白名单 |
+| `MEETING_ENABLED` | `true` | 是否启用会议助手 |
+| `MEETING_ASR_MODEL` | `small` | 本地 Whisper 模型；首次录音时下载 |
+| `MEETING_ASR_LANGUAGE` | `zh` | 默认转写语言 |
+| `MEETING_ASR_DEVICE` | `cpu` | CTranslate2 设备；兼容时可改 `cuda` |
+| `MEETING_ASR_COMPUTE_TYPE` | `int8` | CPU 推荐 `int8`，GPU 可用 `float16` |
+| `MEETING_ASR_BEAM_SIZE` | `2` | 平衡准确率与延迟；提高会增加计算量 |
+| `MEETING_ASR_CONDITION_ON_PREVIOUS_TEXT` | `true` | 使用已确认上下文，提升跨片段连贯性 |
+| `MEETING_ASR_COALESCE_SECONDS` | `1.0` | 至少积累多少新音频再执行一次 ASR |
+| `MEETING_ASR_BUFFER_TRIMMING_SECONDS` | `15.0` | LocalAgreement 处理缓冲上限；过小会重置并丢失长句后半段 |
+| `MEETING_ASR_PAUSE_SEGMENTATION_SECONDS` | `3.0` | 停顿超过该时长时建立稳定分段 |
+| `MEETING_SIMPLIFY_CHINESE` | `true` | 转写统一经 OpenCC 转为简体 |
+| `MEETING_MAX_MINUTES` | `180` | 单场录音时长上限 |
+| `MEETING_SUMMARY_MODEL` | 空 | 纪要/追问模型；空则复用现有模型链 |
+| `MEETING_SUMMARY_TIMEOUT` | `300` | 单次纪要生成超时秒数 |
 
 切换回云端 embedding / rerank 只需改两个变量（需 `DASHSCOPE_API_KEY`）：
 
@@ -451,6 +587,8 @@ RERANKER_PROVIDER=dashscope
 ## 已知限制
 
 - 单用户本地运行，没有账号体系与多租户隔离。
+- 邮件助手只支持 Gmail/Google Calendar；不监控新邮件、不处理附件、不创建新外发邮件、
+  不修改或取消已有日程。邮件正文会发送给当前配置的云端 LLM。
 - 文档修改限定在结构化编辑（值、区域、段落、表格、基础格式）。
   上游实现里的图表、透视表、文档保护等能力保留在代码中但未注册为工具——工具过多会明显拉低模型的工具选择准确率。
 - 只有对话与查询改写需要 `DASHSCOPE_API_KEY`；嵌入与重排走本地权重。未配置 key 时
@@ -475,7 +613,14 @@ RERANKER_PROVIDER=dashscope
 **Schema 变更不会自动作用于已有数据库。** `Base.metadata.create_all` 只创建**缺失的表**，
 从不修改已存在的表。所以给模型加字段后，用全新数据库跑的测试全绿，而真实数据库会在
 写入时报 `no such column`。`app/migrations.py` 负责在启动时补上新增的列与索引，
-策略是**只增不删**（不加列、不建表、不改数据），因此可以安全地每次启动自动执行。
+Schema 变更策略仍是**只增不删**。
+
+**共享旧库的时间戳格式会自动归一化。** 历史数据库同时还被 Java 后端使用过，时间列里
+既有毫秒 epoch 整数，也有 Python 写入的 ISO 字符串，混用会让 `fromisoformat` 报错，
+也会让 `ORDER BY created_at` 不可靠。启动时 `normalize_legacy_timestamps` 只处理
+Python 自有表，把遗留字符串统一转换为 UTC 毫秒 epoch；首次真正修改前会生成
+`data/app.db.pre-epoch-normalize-<时间戳>.bak` 的 SQLite 完整备份。Java 专用表
+（`agent_plans`、`operation_batches`、`plan_steps`）不会被改动。该迁移是幂等的。
 
 **不要给 `a-empty` 传 `:image="null"`。** ant-design-vue 的 Empty 组件内部有
 `typeof image === "object" && "type" in image`，而 `typeof null === "object"` 成立，

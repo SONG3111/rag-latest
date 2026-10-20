@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     # 正常的慢调用击穿，这里取 300s 兜底真正的卡死场景。
     chat_turn_timeout: float = Field(default=300.0)
 
+    # --- 数据分析子 Agent ---
+    # 主 Agent 通过 analyze_and_report 工具，把"分析数据 / 生成报告"类请求委派给一个
+    # 只读子 Agent（子 Agent 的工具集只保留 readOnlyHint 的工具，不可能改文件）。
+    # false 则主 Agent 不暴露该工具。
+    analysis_tool_enabled: bool = Field(default=True)
+    # 子 Agent 自己的工具循环上限，与主 Agent 的预算分开：分析要读表、统计、成文，
+    # 但不该无限循环。
+    analysis_max_iterations: int = Field(default=8)
+    # 分析子 Agent 使用的模型；留空复用 llm_model。分析需要更强的多步推理时可单独指定，
+    # 备用模型链仍然生效。
+    analysis_model: str = Field(default="")
+
     # --- 会话记忆压缩 ---
     # 组装历史时保留的最近原文条数上限（硬上限）；更早的轮次滚动压缩成持久摘要。
     memory_recent_messages: int = Field(default=20)
@@ -165,6 +177,56 @@ class Settings(BaseSettings):
     mcp_server_command: str | None = Field(default=None)
     mcp_tool_timeout: float = Field(default=60.0)
 
+    # --- Gmail / Calendar assistant ---
+    # The Google MCP server is a separate subprocess. Keeping it optional means a
+    # missing OAuth token disables mail/calendar tools without affecting the
+    # document workspace.
+    assistant_enabled: bool = Field(default=True)
+    assistant_model: str = Field(default="")
+    assistant_max_iterations: int = Field(default=8)
+    assistant_action_ttl_hours: float = Field(default=24.0)
+    assistant_timezone: str = Field(default="Asia/Shanghai")
+    assistant_history_messages: int = Field(default=30)
+    google_mcp_server_command: str | None = Field(default=None)
+    google_token_path: str = Field(default="")
+    google_client_secrets_path: str = Field(default="")
+
+    # --- Feishu long connection ---
+    # Empty credentials leave the bridge disabled. User/chat allowlists fail
+    # closed; an empty user allowlist is never interpreted as "allow everyone".
+    feishu_app_id: str = Field(default="")
+    feishu_app_secret: str = Field(default="")
+    feishu_allowed_open_ids: str = Field(default="")
+    feishu_allowed_chat_ids: str = Field(default="")
+    feishu_approver_open_ids: str = Field(default="")
+
+    # --- meeting assistant ---
+    # ASR stays local. The transcript is then sent through the configured chat
+    # model chain for minutes and follow-up questions, matching the rest of the
+    # application's model/privacy boundary.
+    meeting_enabled: bool = Field(default=True)
+    meeting_asr_backend: str = Field(default="faster-whisper")
+    meeting_asr_model: str = Field(default="small")
+    meeting_asr_language: str = Field(default="zh")
+    meeting_asr_device: str = Field(default="cpu")
+    meeting_asr_compute_type: str = Field(default="int8")
+    meeting_asr_model_dir: str = Field(default="")
+    meeting_asr_beam_size: int = Field(default=2)
+    meeting_asr_condition_on_previous_text: bool = Field(default=True)
+    meeting_asr_no_speech_threshold: float = Field(default=0.6)
+    meeting_asr_log_prob_threshold: float = Field(default=-1.0)
+    meeting_asr_compression_ratio_threshold: float = Field(default=2.4)
+    meeting_asr_hallucination_silence_threshold: float = Field(default=2.0)
+    meeting_asr_coalesce_seconds: float = Field(default=1.0)
+    meeting_asr_buffer_trimming_seconds: float = Field(default=15.0)
+    meeting_asr_pause_segmentation_seconds: float = Field(default=3.0)
+    meeting_simplify_chinese: bool = Field(default=True)
+    meeting_max_minutes: int = Field(default=180)
+    meeting_summary_model: str = Field(default="")
+    meeting_summary_timeout: float = Field(default=300.0)
+    meeting_transcript_token_budget: int = Field(default=12000)
+    meeting_max_iterations: int = Field(default=4)
+
     # --- api ---
     cors_origins: list[str] = Field(
         default=["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -199,6 +261,46 @@ class Settings(BaseSettings):
         return self.data_dir / "backups"
 
     @property
+    def secrets_dir(self) -> Path:
+        return self.data_dir / "secrets"
+
+    @property
+    def effective_google_token_path(self) -> Path:
+        if self.google_token_path.strip():
+            return Path(self.google_token_path).expanduser()
+        return self.secrets_dir / "google_token.json"
+
+    @property
+    def effective_google_client_secrets_path(self) -> Path | None:
+        if not self.google_client_secrets_path.strip():
+            return None
+        return Path(self.google_client_secrets_path).expanduser()
+
+    @staticmethod
+    def _csv(value: str) -> list[str]:
+        return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+    @property
+    def feishu_allowed_users(self) -> list[str]:
+        return self._csv(self.feishu_allowed_open_ids)
+
+    @property
+    def feishu_allowed_chats(self) -> list[str]:
+        return self._csv(self.feishu_allowed_chat_ids)
+
+    @property
+    def feishu_approvers(self) -> list[str]:
+        return self._csv(self.feishu_approver_open_ids) or self.feishu_allowed_users
+
+    @property
+    def feishu_configured(self) -> bool:
+        return bool(
+            self.feishu_app_id.strip()
+            and self.feishu_app_secret.strip()
+            and self.feishu_allowed_users
+        )
+
+    @property
     def qdrant_dir(self) -> Path:
         return self.data_dir / "qdrant"
 
@@ -221,6 +323,7 @@ class Settings(BaseSettings):
             self.workspaces_dir,
             self.backups_dir,
             self.qdrant_dir,
+            self.secrets_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

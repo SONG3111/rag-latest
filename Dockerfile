@@ -9,10 +9,20 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# CTranslate2 (used by faster-whisper) loads libgomp at runtime. The slim image
+# does not include it, and the failure otherwise appears only on first recording.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install the shared document tooling first so the layer caches across code edits.
 COPY mcp-office-server/pyproject.toml mcp-office-server/README.md mcp-office-server/LICENSE mcp-office-server/NOTICE.md ./mcp-office-server/
 COPY mcp-office-server/src ./mcp-office-server/src
 RUN pip install --upgrade pip && pip install ./mcp-office-server
+
+COPY mcp-google-server/pyproject.toml mcp-google-server/README.md mcp-google-server/LICENSE mcp-google-server/NOTICE.md ./mcp-google-server/
+COPY mcp-google-server/src ./mcp-google-server/src
+RUN pip install ./mcp-google-server
 
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install -r backend/requirements.txt
@@ -21,7 +31,7 @@ COPY backend ./backend
 
 # The MCP server is spawned as a subprocess by the backend, so the sandbox root
 # has to exist inside the image.
-RUN mkdir -p /app/data/workspaces /app/data/backups /app/data/qdrant
+RUN mkdir -p /app/data/workspaces /app/data/backups /app/data/qdrant /app/data/secrets
 
 ENV PYTHONPATH=/app/backend \
     DATA_DIR=/app/data

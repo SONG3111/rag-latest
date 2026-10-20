@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     Enum,
     ForeignKey,
     Index,
@@ -21,6 +20,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+# All model timestamps use the compatibility type. The local alias keeps the
+# column declarations readable while making clear this is not SQLAlchemy's
+# plain DateTime (which cannot read the legacy epoch-millisecond rows).
+from .db_types import EpochMillisDateTime as DateTime
 
 
 def _uuid() -> str:
@@ -48,6 +51,31 @@ class OperationStatus(str, enum.Enum):
     proposed = "proposed"
     applied = "applied"
     rejected = "rejected"
+    failed = "failed"
+
+
+class AssistantActionStatus(str, enum.Enum):
+    proposed = "proposed"
+    approved = "approved"
+    executing = "executing"
+    applied = "applied"
+    rejected = "rejected"
+    failed = "failed"
+    expired = "expired"
+
+
+class MeetingStatus(str, enum.Enum):
+    draft = "draft"
+    recording = "recording"
+    recorded = "recorded"
+    interrupted = "interrupted"
+    failed = "failed"
+
+
+class MeetingSummaryStatus(str, enum.Enum):
+    none = "none"
+    generating = "generating"
+    ready = "ready"
     failed = "failed"
 
 
@@ -249,6 +277,114 @@ class Operation(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="operations")
 
 
+class AssistantConversation(Base):
+    """One conversation with the mail/calendar assistant.
+
+    The web UI owns a single ``web-default`` row; every Feishu chat gets its own
+    row keyed by the chat id. Keeping the channel identity explicit prevents a
+    forwarded Feishu event from being replayed into another user's thread.
+    """
+
+    __tablename__ = "assistant_conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel", "external_chat_id", name="uq_assistant_conversation_channel"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False)
+    external_chat_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+    messages: Mapped[list["AssistantMessage"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+    actions: Mapped[list["AssistantAction"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+
+
+class AssistantMessage(Base):
+    """A persisted turn in an assistant conversation.
+
+    ``external_event_id`` is the Feishu event id. The unique constraint is the
+    replay guard: Feishu can redeliver an event after a reconnect, and a second
+    agent turn would otherwise duplicate both the answer and any proposal.
+    """
+
+    __tablename__ = "assistant_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "external_event_id", name="uq_assistant_external_event"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    role: Mapped[MessageRole] = mapped_column(Enum(MessageRole), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    external_event_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    meta: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, index=True, nullable=False
+    )
+
+    conversation: Mapped[AssistantConversation] = relationship(back_populates="messages")
+
+
+class AssistantAction(Base):
+    """A Gmail/Calendar mutation waiting for human approval.
+
+    The row stores the exact MCP tool call. A successful approval claims the row
+    with an atomic status transition before invoking the tool, so two browser
+    clicks or a replayed Feishu card cannot send the same email twice.
+    """
+
+    __tablename__ = "assistant_actions"
+    __table_args__ = (
+        Index("ix_assistant_action_status", "status", "created_at"),
+        UniqueConstraint("idempotency_key", name="uq_assistant_action_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    source_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    preview: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[AssistantActionStatus] = mapped_column(
+        Enum(AssistantActionStatus),
+        default=AssistantActionStatus.proposed,
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(64), default=_uuid, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    approval_channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, index=True, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    conversation: Mapped[AssistantConversation] = relationship(back_populates="actions")
+
+
 class McpToolCache(Base):
     """Snapshot of tools advertised by the MCP server, with their annotations.
 
@@ -266,3 +402,83 @@ class McpToolCache(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_now, onupdate=_now, nullable=False
     )
+
+
+class Meeting(Base):
+    """One locally transcribed meeting and its generated minutes.
+
+    Audio is deliberately absent from this model. The browser streams PCM to the
+    live ASR adapter, and only confirmed transcript lines, notes, and the final
+    Markdown minutes are persisted. That keeps privacy and disk usage bounded
+    while still allowing a meeting to survive a page reload or process restart.
+    """
+
+    __tablename__ = "meetings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    status: Mapped[MeetingStatus] = mapped_column(
+        Enum(MeetingStatus), default=MeetingStatus.draft, nullable=False
+    )
+    summary_status: Mapped[MeetingSummaryStatus] = mapped_column(
+        Enum(MeetingSummaryStatus),
+        default=MeetingSummaryStatus.none,
+        nullable=False,
+    )
+    language: Mapped[str] = mapped_column(String(10), default="zh", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, index=True, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+    segments: Mapped[list["MeetingSegment"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+        order_by="MeetingSegment.ordinal",
+    )
+
+
+class MeetingSegment(Base):
+    """A confirmed transcript line with a stable position in meeting audio time.
+
+    ``(meeting_id, start_ms, end_ms)`` is the idempotency key. WhisperLiveKit
+    sends the full committed line list on every update; upserting by this key
+    prevents a repeated snapshot from duplicating rows while still allowing a
+    line's text to be corrected before the meeting ends.
+    """
+
+    __tablename__ = "meeting_segments"
+    __table_args__ = (
+        UniqueConstraint(
+            "meeting_id", "start_ms", "end_ms", name="uq_meeting_segment_span"
+        ),
+        Index(
+            "uq_meeting_segment_start",
+            "meeting_id",
+            "start_ms",
+            unique=True,
+        ),
+        Index("ix_meeting_segment_order", "meeting_id", "ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    meeting_id: Mapped[str] = mapped_column(
+        ForeignKey("meetings.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    token_counts: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    token_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+
+    meeting: Mapped[Meeting] = relationship(back_populates="segments")

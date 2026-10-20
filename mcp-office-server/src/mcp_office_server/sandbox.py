@@ -122,6 +122,25 @@ def resolve_document(path: str, *, must_exist: bool = True) -> Path:
     return resolved
 
 
+def resolve_excel(path: str, *, must_exist: bool = True) -> Path:
+    """Resolve a path and assert it is an Excel workbook.
+
+    The statistics tools are built on openpyxl, so a Word document handed to one of
+    them used to fail deep inside the reader as ``corrupt_document`` — a message that
+    (with its "check you can open it with Excel first" wording) reads like the file
+    is damaged. That invites the agent to tell the user to re-upload a perfectly good
+    document. Rejecting the type here names the actual problem instead.
+    """
+    resolved = resolve_document(path, must_exist=must_exist)
+    if resolved.suffix.lower() not in EXCEL_SUFFIXES:
+        raise UnsupportedDocument(
+            f"'{resolved.name}' is a Word document, but statistics tools only read "
+            f"Excel ({', '.join(sorted(EXCEL_SUFFIXES))}); "
+            "use read_table / read_paragraphs for Word content"
+        )
+    return resolved
+
+
 def document_kind(path: str | Path) -> str:
     """Classify a document as ``excel`` or ``word``."""
     suffix = Path(path).suffix.lower()

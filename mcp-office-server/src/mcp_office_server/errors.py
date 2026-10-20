@@ -38,6 +38,16 @@ class SheetNotFound(ToolError):
     code = "sheet_not_found"
 
 
+class ColumnNotFound(ToolError):
+    """Raised when a statistics tool is asked about a column that does not exist.
+
+    The message lists the header row's available columns so the model can retry
+    with an exact name instead of guessing.
+    """
+
+    code = "column_not_found"
+
+
 class RangeError(ToolError):
     code = "invalid_range"
 

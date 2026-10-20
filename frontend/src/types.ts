@@ -72,6 +72,129 @@ export interface McpTool {
   schema: Record<string, unknown>
 }
 
+export interface AssistantTool {
+  name: string
+  description: string
+  read_only: boolean
+  destructive: boolean
+  requires_approval: boolean
+  schema: Record<string, unknown>
+}
+
+export interface AssistantAction {
+  id: string
+  conversation_id: string
+  source_message_id: string | null
+  tool_name: string
+  arguments: Record<string, unknown>
+  preview: Record<string, unknown>
+  summary: string
+  status: 'proposed' | 'approved' | 'executing' | 'applied' | 'rejected' | 'failed' | 'expired'
+  approved_by: string | null
+  approval_channel: string | null
+  result: Record<string, unknown> | null
+  error: string | null
+  created_at: string
+  expires_at: string
+  resolved_at: string | null
+}
+
+export interface AssistantMessage {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  external_event_id: string | null
+  meta: {
+    action_ids?: string[]
+    [key: string]: unknown
+  }
+  created_at: string
+}
+
+export interface AssistantHealth {
+  enabled: boolean
+  google_mcp_started: boolean
+  google_auth_ready: boolean
+  google_error: string | null
+  feishu_configured: boolean
+  feishu_connected: boolean
+  feishu_error: string | null
+  pending_actions: number
+}
+
+export interface AssistantActivity {
+  id: string
+  tool: string
+  label: string
+  status: 'running' | 'done'
+}
+
+export interface AssistantTurn {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  activities: AssistantActivity[]
+  proposals: AssistantAction[]
+  streaming: boolean
+  messageId?: string
+  error?: string
+}
+
+export type MeetingStatus = 'draft' | 'recording' | 'recorded' | 'interrupted' | 'failed'
+export type MeetingSummaryStatus = 'none' | 'generating' | 'ready' | 'failed'
+
+export interface MeetingSegment {
+  id: string
+  meeting_id: string
+  ordinal: number
+  start_ms: number
+  end_ms: number
+  text: string
+}
+
+export interface MeetingListItem {
+  id: string
+  title: string
+  status: MeetingStatus
+  summary_status: MeetingSummaryStatus
+  language: 'zh' | 'en' | 'auto'
+  started_at: string | null
+  ended_at: string | null
+  duration_seconds: number
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MeetingDetail extends MeetingListItem {
+  notes: string
+  summary_markdown: string
+  segments: MeetingSegment[]
+}
+
+export interface MeetingHealth {
+  enabled: boolean
+  available: boolean
+  ready: boolean
+  loading: boolean
+  backend: string
+  model: string
+  language: string
+  device: string
+  compute_type: string
+  error: string | null
+}
+
+export interface MeetingChatTurn {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  activities: AssistantActivity[]
+  streaming: boolean
+  error?: string
+}
+
 export interface IndexingResult {
   file_id: string
   rel_path: string

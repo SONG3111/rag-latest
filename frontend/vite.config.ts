@@ -22,6 +22,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        // Meeting audio uses a WebSocket under /api; SSE keeps using the same
+        // same-origin proxy with normal HTTP streaming.
+        ws: true,
       },
       // The health endpoint lives outside /api, so it needs its own rule. Without
       // it Vite's SPA fallback answers the request with index.html, and the client

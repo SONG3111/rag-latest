@@ -23,7 +23,7 @@ from typing import Any, Iterable
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from . import calculator, excel_ops, sandbox, word_ops
+from . import calculator, excel_ops, sandbox, stats_ops, word_ops
 from .errors import SheetNotFound, ToolError, error_payload
 
 # stdio transport reserves stdout for protocol frames, so logs must go to stderr.
@@ -259,6 +259,126 @@ def calculate(
             )
         value = calculator.safe_arithmetic(expression)
         return _ok({"expression": expression, "value": excel_ops._jsonify(value)})
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+# --------------------------------------------------------------------------- #
+# statistics tools (read-only)
+# --------------------------------------------------------------------------- #
+@mcp.tool(annotations=READ_ONLY)
+def describe_column(
+    path: str,
+    sheet_name: str,
+    column: str,
+    header_row: int = 1,
+) -> str:
+    """对 Excel 某一列做描述统计（只读，不改文件）。
+
+    用于"某列的平均/合计/最大/最小/中位数/波动有多大"这类问题。
+    所有数字都从文件真实单元格算出，可直接写进分析报告。
+
+    Args:
+        path: 相对工作区的 Excel 文件路径。
+        sheet_name: 工作表名称。
+        column: 列寻址，支持三种写法——表头文本（如"销售额"）、列字母（如"C"）
+            或列序号（如"3"，从 1 开始）。
+        header_row: 表头所在行号（默认 1），数据从它的下一行开始统计。
+
+    返回 sum / mean / median / min / max / stdev(样本标准差) / q1 / q3，
+    以及 missing（空单元格数）与 formula_without_cache（公式无缓存结果、
+    已从统计中排除的单元格数）。后两者非零时，请按 hint 提示处理再下结论。
+    """
+    try:
+        resolved = sandbox.resolve_excel(path)
+        return _ok(stats_ops.describe_column(resolved, sheet_name, column, header_row))
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def aggregate(
+    path: str,
+    sheet_name: str,
+    group_by: str,
+    value_column: str | None = None,
+    agg: str = "sum",
+    header_row: int = 1,
+    top_n: int = 20,
+    sort: str = "desc",
+) -> str:
+    """按一个维度分组，对另一列做聚合（只读，不改文件）。
+
+    用于"每个区域/产品/部门的合计是多少""哪个排第一"这类分组统计。
+    不传 value_column 时，退化为对分组列的频次统计（相当于"各有几条"）。
+
+    Args:
+        path: 相对工作区的 Excel 文件路径。
+        sheet_name: 工作表名称。
+        group_by: 分组列（表头文本 / 列字母 / 列序号）。
+        value_column: 被聚合的数值列；留空表示只做计数。
+        agg: 聚合方式，可选 sum / mean / count / min / max / median。
+        header_row: 表头所在行号（默认 1）。
+        top_n: 返回前 N 个分组（按聚合值排序后截断，默认 20）。
+        sort: desc（默认，从大到小）或 asc。
+
+    返回 groups:[{key, value, count}] 与 group_count / truncated；
+    空分组与无法参与聚合的值分别记录在 skipped 里。
+    """
+    try:
+        resolved = sandbox.resolve_excel(path)
+        return _ok(
+            stats_ops.aggregate(
+                resolved, sheet_name, group_by,
+                value_column=value_column, agg=agg, header_row=header_row,
+                top_n=top_n, sort=sort,
+            )
+        )
+    except ToolError as exc:
+        return _handle(exc)
+    except Exception as exc:  # envelope backstop — see _unexpected
+        return _unexpected(exc)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def sort_by(
+    path: str,
+    sheet_name: str,
+    by_column: str,
+    descending: bool = True,
+    top_n: int = 20,
+    header_row: int = 1,
+    columns: list[str] | None = None,
+) -> str:
+    """按某一列排序取前 N 行明细（只读，不改文件）。
+
+    用于"销售额最高的前 5 个产品是哪些""最近几笔金额最大的记录"这类问题。
+    需要的是行明细时用它；只要聚合值时用 aggregate。
+
+    Args:
+        path: 相对工作区的 Excel 文件路径。
+        sheet_name: 工作表名称。
+        by_column: 排序列（表头文本 / 列字母 / 列序号）。
+        descending: true 从大到小（默认），false 升序。
+        top_n: 返回前 N 行（默认 20）。
+        header_row: 表头所在行号（默认 1）。
+        columns: 输出中保留的列（留空=数据区全部列，最多 20 列）。
+
+    返回 rows:[{rank, 表头: 值, ...}] 与 row_count / truncated。
+    """
+    try:
+        resolved = sandbox.resolve_excel(path)
+        return _ok(
+            stats_ops.sort_by(
+                resolved, sheet_name, by_column,
+                descending=descending, top_n=top_n, header_row=header_row,
+                columns=columns,
+            )
+        )
     except ToolError as exc:
         return _handle(exc)
     except Exception as exc:  # envelope backstop — see _unexpected

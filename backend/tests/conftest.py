@@ -75,6 +75,8 @@ def _no_small_model_calls(monkeypatch: pytest.MonkeyPatch):
     factories themselves.
     """
     import app.agent.intent as intent_module
+    import app.meeting.agent as meeting_agent_module
+    import app.meeting.minutes as meeting_minutes_module
     import app.services.followups as followups_module
     import app.services.memory as memory_module
 
@@ -84,6 +86,14 @@ def _no_small_model_calls(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(intent_module, "build_chat_model", _disabled)
     monkeypatch.setattr(memory_module, "build_chat_model", _disabled)
     monkeypatch.setattr(followups_module, "build_chat_model", _disabled)
+    monkeypatch.setattr(meeting_agent_module, "build_chat_model", _disabled)
+    monkeypatch.setattr(
+        meeting_agent_module, "build_resilient_chat_model", _disabled
+    )
+    monkeypatch.setattr(meeting_minutes_module, "build_chat_model", _disabled)
+    monkeypatch.setattr(
+        meeting_minutes_module, "build_resilient_chat_model", _disabled
+    )
 
 
 @pytest.fixture()
