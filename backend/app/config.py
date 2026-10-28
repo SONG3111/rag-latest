@@ -177,19 +177,22 @@ class Settings(BaseSettings):
     mcp_server_command: str | None = Field(default=None)
     mcp_tool_timeout: float = Field(default=60.0)
 
-    # --- Gmail / Calendar assistant ---
-    # The Google MCP server is a separate subprocess. Keeping it optional means a
-    # missing OAuth token disables mail/calendar tools without affecting the
-    # document workspace.
+    # --- Feishu Mail / Calendar assistant ---
+    # Mail and calendar capabilities run in a separate MCP subprocess using the
+    # same Feishu app as the bot. A user access token is required for mailbox
+    # search/write and user Calendar APIs.
     assistant_enabled: bool = Field(default=True)
     assistant_model: str = Field(default="")
     assistant_max_iterations: int = Field(default=8)
     assistant_action_ttl_hours: float = Field(default=24.0)
     assistant_timezone: str = Field(default="Asia/Shanghai")
     assistant_history_messages: int = Field(default=30)
-    google_mcp_server_command: str | None = Field(default=None)
-    google_token_path: str = Field(default="")
-    google_client_secrets_path: str = Field(default="")
+    feishu_mcp_server_command: str | None = Field(default=None)
+    feishu_mail_user_mailbox_id: str = Field(default="")
+    feishu_calendar_id: str = Field(default="")
+    feishu_user_token_path: str = Field(default="")
+    feishu_oauth_scopes: str = Field(default="")
+    feishu_open_base_url: str = Field(default="https://open.feishu.cn")
 
     # --- Feishu long connection ---
     # Empty credentials leave the bridge disabled. User/chat allowlists fail
@@ -226,6 +229,30 @@ class Settings(BaseSettings):
     meeting_summary_timeout: float = Field(default=300.0)
     meeting_transcript_token_budget: int = Field(default=12000)
     meeting_max_iterations: int = Field(default=4)
+
+    # --- news radar ---
+    # A user question triggers collection; a recent snapshot is reused for follow-ups.
+    # Calendar dates still follow the configured local timezone.
+    news_enabled: bool = Field(default=True)
+    news_timezone: str = Field(default="Asia/Shanghai")
+    # Every user question reuses a recent snapshot, then refreshes it on demand.
+    news_cache_minutes: int = Field(default=15)
+    news_window_hours: int = Field(default=24)
+    news_candidate_limit: int = Field(default=18)
+    news_max_events_per_category: int = Field(default=5)
+    news_importance_threshold: float = Field(default=6.0)
+    news_retention_days: int = Field(default=30)
+    news_fetch_concurrency: int = Field(default=6)
+    news_fetch_timeout: float = Field(default=15.0)
+    news_max_response_bytes: int = Field(default=2_000_000)
+    news_custom_topic_limit: int = Field(default=3)
+    news_hot_api_base_url: str = Field(default="http://127.0.0.1:6688")
+    news_enable_google: bool = Field(default=False)
+    news_enable_global: bool = Field(default=False)
+    news_extra_rss: str = Field(default="")
+    news_model: str = Field(default="")
+    news_max_iterations: int = Field(default=6)
+    news_history_messages: int = Field(default=30)
 
     # --- api ---
     cors_origins: list[str] = Field(
@@ -265,16 +292,10 @@ class Settings(BaseSettings):
         return self.data_dir / "secrets"
 
     @property
-    def effective_google_token_path(self) -> Path:
-        if self.google_token_path.strip():
-            return Path(self.google_token_path).expanduser()
-        return self.secrets_dir / "google_token.json"
-
-    @property
-    def effective_google_client_secrets_path(self) -> Path | None:
-        if not self.google_client_secrets_path.strip():
-            return None
-        return Path(self.google_client_secrets_path).expanduser()
+    def effective_feishu_user_token_path(self) -> Path:
+        if self.feishu_user_token_path.strip():
+            return Path(self.feishu_user_token_path).expanduser()
+        return self.secrets_dir / "feishu_user_token.json"
 
     @staticmethod
     def _csv(value: str) -> list[str]:
@@ -299,6 +320,19 @@ class Settings(BaseSettings):
             and self.feishu_app_secret.strip()
             and self.feishu_allowed_users
         )
+
+    @property
+    def feishu_mail_configured(self) -> bool:
+        return bool(
+            self.feishu_app_id.strip()
+            and self.feishu_app_secret.strip()
+            and self.feishu_mail_user_mailbox_id.strip()
+            and self.effective_feishu_user_token_path.exists()
+        )
+
+    @property
+    def news_extra_rss_urls(self) -> list[str]:
+        return self._csv(self.news_extra_rss)
 
     @property
     def qdrant_dir(self) -> Path:

@@ -93,7 +93,7 @@ async function send(text?: string) {
       <div v-if="store.turns.length === 0" class="empty welcome">
         <div class="welcome-title">从飞书或这里发指令</div>
         <div class="welcome-sub">
-          可以搜索和阅读 Gmail、准备回复草稿、检查空闲时间并安排会议。<br />
+          可以搜索和阅读飞书邮箱、准备回复草稿、检查空闲时间并安排飞书会议。<br />
           保存草稿、发送邮件和创建会议都会先生成待确认操作。
         </div>
         <div class="examples">

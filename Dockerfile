@@ -20,9 +20,9 @@ COPY mcp-office-server/pyproject.toml mcp-office-server/README.md mcp-office-ser
 COPY mcp-office-server/src ./mcp-office-server/src
 RUN pip install --upgrade pip && pip install ./mcp-office-server
 
-COPY mcp-google-server/pyproject.toml mcp-google-server/README.md mcp-google-server/LICENSE mcp-google-server/NOTICE.md ./mcp-google-server/
-COPY mcp-google-server/src ./mcp-google-server/src
-RUN pip install ./mcp-google-server
+COPY mcp-feishu-server/pyproject.toml mcp-feishu-server/README.md mcp-feishu-server/LICENSE mcp-feishu-server/NOTICE.md ./mcp-feishu-server/
+COPY mcp-feishu-server/src ./mcp-feishu-server/src
+RUN pip install ./mcp-feishu-server
 
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install -r backend/requirements.txt

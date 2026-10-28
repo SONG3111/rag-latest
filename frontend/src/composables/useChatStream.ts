@@ -8,6 +8,7 @@
  */
 
 import { drainSseEvents } from './sse'
+import type { NewsDigest } from '@/types'
 
 export interface StreamHandlers {
   onToken?: (payload: { text: string }) => void
@@ -49,6 +50,7 @@ export interface AssistantStreamHandlers {
   onToolCall?: (payload: { tool: string; args: Record<string, unknown>; label: string }) => void
   onToolResult?: (payload: { tool_call_id: string; content: string }) => void
   onProposal?: (payload: AssistantProposalPayload) => void
+  onDigest?: (payload: { digest: NewsDigest }) => void
   onDone?: (payload: { content: string; message_id?: string; conversation_id?: string }) => void
   onError?: (payload: { message: string }) => void
 }
@@ -175,6 +177,43 @@ export async function streamMeetingChat(
   for (const parsed of events) dispatchAssistant(parsed.event, parsed.data, handlers)
 }
 
+export async function streamNewsChat(
+  message: string,
+  handlers: AssistantStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch('/api/news/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({ message }),
+    signal,
+  })
+  if (!response.ok || !response.body) {
+    let detail = `${response.status} ${response.statusText}`
+    try {
+      const payload = await response.json()
+      if (payload?.detail) detail = String(payload.detail)
+    } catch {
+      /* no JSON body */
+    }
+    throw new Error(`新闻追问失败：${detail}`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const { events, rest } = drainSseEvents(buffer)
+    buffer = rest
+    for (const parsed of events) dispatchAssistant(parsed.event, parsed.data, handlers)
+  }
+  buffer += decoder.decode()
+  const { events } = drainSseEvents(buffer + '\n\n')
+  for (const parsed of events) dispatchAssistant(parsed.event, parsed.data, handlers)
+}
+
 function dispatch(event: string, data: any, handlers: StreamHandlers): void {
   switch (event) {
     case 'token':
@@ -226,6 +265,9 @@ function dispatchAssistant(
       break
     case 'tool_result':
       handlers.onToolResult?.(data)
+      break
+    case 'digest':
+      handlers.onDigest?.(data)
       break
     case 'proposal':
       handlers.onProposal?.(data)

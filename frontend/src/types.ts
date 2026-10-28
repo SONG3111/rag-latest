@@ -114,9 +114,9 @@ export interface AssistantMessage {
 
 export interface AssistantHealth {
   enabled: boolean
-  google_mcp_started: boolean
-  google_auth_ready: boolean
-  google_error: string | null
+  mail_mcp_started: boolean
+  mail_auth_ready: boolean
+  mail_error: string | null
   feishu_configured: boolean
   feishu_connected: boolean
   feishu_error: string | null
@@ -251,4 +251,111 @@ export interface CitationPreview {
    * `rows`; for word_paragraphs the paragraph's absolute index.
    */
   highlight?: number | null
+}
+
+export interface NewsCategory {
+  id: string
+  label: string
+  description: string
+}
+
+export interface NewsCategories {
+  categories: NewsCategory[]
+  defaults: string[]
+  custom_topic_limit: number
+}
+
+export interface NewsPreference {
+  categories: string[]
+  custom_topics: string[]
+}
+
+export interface NewsSourceRef {
+  article_id: string
+  source_name: string
+  source_domain: string
+  title: string
+  original_title: string
+  url: string
+  published_at: string
+  time_basis: 'published' | 'observed'
+  language: string
+}
+
+export interface NewsEvent {
+  id: string
+  category: string
+  category_label: string
+  title: string
+  original_title: string
+  summary: string
+  why_it_matters: string
+  importance: number
+  confidence: number
+  source_count: number
+  published_at: string
+  time_basis: 'published' | 'observed'
+  sources: NewsSourceRef[]
+}
+
+export interface NewsDigest {
+  id: string
+  edition_date: string
+  window_start: string
+  window_end: string
+  categories: string[]
+  custom_topics: string[]
+  trigger: 'scheduled' | 'manual'
+  status: 'pending' | 'running' | 'ready' | 'failed'
+  degraded: boolean
+  warnings: string[]
+  source_stats: {
+    attempted?: number
+    succeeded?: number
+    failed?: number
+    articles?: number
+  }
+  error: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  events: NewsEvent[]
+}
+
+export interface NewsHealth {
+  enabled: boolean
+  timezone: string
+  generation_mode: 'on_demand'
+  cache_minutes: number
+  providers: Record<
+    string,
+    {
+      enabled: boolean
+      base_url?: string
+      last_run?: Record<string, number>
+    }
+  >
+  last_digest_status: string | null
+  last_digest_at: string | null
+  last_error: string | null
+}
+
+export interface NewsMessage {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  external_event_id: string | null
+  meta: Record<string, unknown>
+  created_at: string
+}
+
+export interface NewsTurn {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  activities: AssistantActivity[]
+  streaming: boolean
+  messageId?: string
+  error?: string
 }

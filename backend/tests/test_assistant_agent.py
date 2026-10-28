@@ -1,6 +1,6 @@
 """Assistant control-flow tests with a scripted model and fake MCP tools.
 
-No real LLM, Gmail, or Calendar call is made. The tests pin the most important
+No real LLM, Feishu Mail, or Calendar call is made. The tests pin the most important
 property: a write tool can only create a pending action, never execute during
 the agent turn.
 """

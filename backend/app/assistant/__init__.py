@@ -1,1 +1,1 @@
-"""Gmail / Google Calendar assistant with durable human approval."""
+"""Feishu Mail / Calendar assistant with durable human approval."""

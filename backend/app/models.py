@@ -79,6 +79,13 @@ class MeetingSummaryStatus(str, enum.Enum):
     failed = "failed"
 
 
+class NewsDigestStatus(str, enum.Enum):
+    pending = "pending"
+    running = "running"
+    ready = "ready"
+    failed = "failed"
+
+
 class Workspace(Base):
     __tablename__ = "workspaces"
 
@@ -342,7 +349,7 @@ class AssistantMessage(Base):
 
 
 class AssistantAction(Base):
-    """A Gmail/Calendar mutation waiting for human approval.
+    """A Feishu Mail/Calendar mutation waiting for human approval.
 
     The row stores the exact MCP tool call. A successful approval claims the row
     with an atomic status transition before invoking the tool, so two browser
@@ -482,3 +489,129 @@ class MeetingSegment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
 
     meeting: Mapped[Meeting] = relationship(back_populates="segments")
+
+
+class NewsPreference(Base):
+    """The single local user's last news-category selection.
+
+    Keeping this server-side (rather than only in browser storage) is what lets a
+    news question generate the same categories the user last chose.
+    """
+
+    __tablename__ = "news_preferences"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: "default")
+    categories: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    custom_topics: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+
+class NewsDigest(Base):
+    """One immutable news snapshot revision.
+
+    Each question-triggered collection creates a revision rather than replacing an
+    older snapshot, so the history page can distinguish what the user saw and when.
+    """
+
+    __tablename__ = "news_digests"
+    __table_args__ = (
+        Index("ix_news_digest_date_status", "edition_date", "status"),
+        UniqueConstraint("generation_key", name="uq_news_digest_generation_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    edition_date: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    categories: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    custom_topics: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
+    status: Mapped[NewsDigestStatus] = mapped_column(
+        Enum(NewsDigestStatus), default=NewsDigestStatus.pending, nullable=False
+    )
+    degraded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    warnings: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    source_stats: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    generation_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, index=True, nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    events: Mapped[list["NewsEvent"]] = relationship(
+        back_populates="digest", cascade="all, delete-orphan"
+    )
+    articles: Mapped[list["NewsArticle"]] = relationship(
+        back_populates="digest", cascade="all, delete-orphan"
+    )
+
+
+class NewsArticle(Base):
+    """Normalized feed item retained for evidence and follow-up search."""
+
+    __tablename__ = "news_articles"
+    __table_args__ = (
+        UniqueConstraint(
+            "digest_id", "category", "canonical_url", name="uq_news_digest_category_url"
+        ),
+        Index("ix_news_article_category_time", "category", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    digest_id: Mapped[str] = mapped_column(
+        ForeignKey("news_digests.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    original_title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    source_domain: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    source_tier: Mapped[str] = mapped_column(String(20), default="media", nullable=False)
+    language: Mapped[str] = mapped_column(String(10), default="zh", nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # "published" means the feed supplied a publication timestamp; "observed"
+    # means this is a hot-list snapshot and the time is when we fetched it.
+    time_basis: Mapped[str] = mapped_column(
+        String(20), default="published", nullable=False
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_status: Mapped[str] = mapped_column(String(20), default="feed", nullable=False)
+
+    digest: Mapped[NewsDigest] = relationship(back_populates="articles")
+
+
+class NewsEvent(Base):
+    """A cross-source event cluster shown as one card in a digest."""
+
+    __tablename__ = "news_events"
+    __table_args__ = (
+        Index("ix_news_event_digest_rank", "digest_id", "rank"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    digest_id: Mapped[str] = mapped_column(
+        ForeignKey("news_digests.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    original_title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    why_it_matters: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    importance: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    confidence: Mapped[float] = mapped_column(default=1.0, nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    article_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+
+    digest: Mapped[NewsDigest] = relationship(back_populates="events")

@@ -1,4 +1,4 @@
-"""Conversation persistence and the durable Gmail/Calendar approval loop.
+"""Conversation persistence and the durable Feishu Mail/Calendar approval loop.
 
 The pending -> approved -> executing transition is a compare-and-set update.
 `Anil-matcha/open-agent-email` (Apache-2.0) uses the same shape for its review
@@ -17,7 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..db import session_scope
-from ..mcp_client import McpGoogleClient, parse_tool_result
+from ..mcp_client import McpFeishuClient, parse_tool_result
 from ..models import (
     AssistantAction,
     AssistantActionStatus,
@@ -187,7 +187,7 @@ def _summary(tool_name: str, preview: dict[str, Any]) -> str:
     if tool_name == "send_reply":
         return f"发送邮件回复给 {preview.get('to')}"
     if tool_name == "send_draft":
-        return f"发送 Gmail 草稿 {preview.get('draft_id')}"
+        return f"发送飞书邮箱草稿 {preview.get('draft_id')}"
     if tool_name == "create_calendar_event":
         suffix = "，并邀请参会人" if preview.get("invitations") else ""
         return (
@@ -328,7 +328,7 @@ def reject_action(
 async def execute_approved_action(
     session: Session,
     action_id: str,
-    client: McpGoogleClient,
+    client: McpFeishuClient,
 ) -> AssistantAction:
     now = _now()
     claimed = session.execute(
@@ -381,7 +381,7 @@ async def execute_approved_action(
 async def apply_action(
     session: Session,
     action_id: str,
-    client: McpGoogleClient,
+    client: McpFeishuClient,
     *,
     approved_by: str,
     channel: str,
@@ -390,7 +390,7 @@ async def apply_action(
     return await execute_approved_action(session, action_id, client)
 
 
-async def execute_action_in_background(action_id: str, client: McpGoogleClient) -> None:
+async def execute_action_in_background(action_id: str, client: McpFeishuClient) -> None:
     """Execute an action claimed by the Feishu callback in its own session."""
     with session_scope() as session:
         await execute_approved_action(session, action_id, client)
@@ -403,7 +403,7 @@ def get_action(session: Session, action_id: str) -> AssistantAction:
 def recover_interrupted_actions(session: Session) -> int:
     """Fail closed after a restart in the middle of an external write.
 
-    We cannot prove whether Gmail/Calendar accepted the call before the process
+    We cannot prove whether Feishu Mail/Calendar accepted the call before the process
     died, so retrying automatically could send twice. Mark it failed and require
     the user to inspect the mailbox/calendar before creating a new proposal.
     """
@@ -418,7 +418,7 @@ def recover_interrupted_actions(session: Session) -> int:
         .values(
             status=AssistantActionStatus.failed,
             error=(
-                "执行过程被中断，外部结果不确定；请先检查 Gmail/Calendar，"
+                "执行过程被中断，外部结果不确定；请先检查飞书邮箱/日历，"
                 "确认后再决定是否重新提交。"
             ),
             resolved_at=now,

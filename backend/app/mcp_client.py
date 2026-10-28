@@ -88,29 +88,26 @@ def build_server_params(
     )
 
 
-def build_google_server_params(settings: Settings | None = None) -> StdioServerParameters:
-    """Describe the Gmail/Calendar MCP subprocess.
-
-    The Google package is installed beside the office package but launched as a
-    separate stdio process. That isolates OAuth credentials from the document
-    sandbox and lets either capability fail without taking down the other.
-    """
+def build_feishu_server_params(settings: Settings | None = None) -> StdioServerParameters:
+    """Describe the Feishu Mail/Calendar MCP subprocess."""
     settings = settings or get_settings()
-    if settings.google_mcp_server_command:
-        argv = shlex.split(settings.google_mcp_server_command, posix=False)
+    if settings.feishu_mcp_server_command:
+        argv = shlex.split(settings.feishu_mcp_server_command, posix=False)
         argv = [item.strip("\"'") for item in argv]
         command, args = argv[0], argv[1:]
     else:
-        command, args = sys.executable, ["-m", "mcp_google_server.server"]
+        command, args = sys.executable, ["-m", "mcp_feishu_server.server"]
     env = {
-        "GOOGLE_TOKEN_PATH": str(settings.effective_google_token_path),
+        "FEISHU_APP_ID": settings.feishu_app_id,
+        "FEISHU_APP_SECRET": settings.feishu_app_secret,
+        "FEISHU_MAIL_USER_MAILBOX_ID": settings.feishu_mail_user_mailbox_id,
+        "FEISHU_CALENDAR_ID": settings.feishu_calendar_id,
+        "FEISHU_USER_TOKEN_PATH": str(settings.effective_feishu_user_token_path),
+        "FEISHU_OAUTH_SCOPES": settings.feishu_oauth_scopes,
+        "FEISHU_OPEN_BASE_URL": settings.feishu_open_base_url,
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUNBUFFERED": "1",
     }
-    if settings.effective_google_client_secrets_path is not None:
-        env["GOOGLE_CLIENT_SECRETS_PATH"] = str(
-            settings.effective_google_client_secrets_path
-        )
     return StdioServerParameters(
         command=command,
         args=args,
@@ -249,11 +246,11 @@ class McpOfficeClient:
         return True if profile is None else profile.requires_approval
 
 
-class McpGoogleClient(McpOfficeClient):
-    """MCP client for the Gmail/Calendar subprocess."""
+class McpFeishuClient(McpOfficeClient):
+    """MCP client for the Feishu Mail/Calendar subprocess."""
 
     def server_params(self) -> StdioServerParameters:
-        return build_google_server_params(self.settings)
+        return build_feishu_server_params(self.settings)
 
 
 async def load_tools_once(settings: Settings | None = None) -> list[BaseTool]:

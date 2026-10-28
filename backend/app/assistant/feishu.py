@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from ..config import Settings, get_settings
 from ..db import SessionLocal
 from ..llm.resilience import translate_provider_error
-from ..mcp_client import McpGoogleClient
+from ..mcp_client import McpFeishuClient
 from ..models import AssistantAction, MessageRole
 from .agent import AssistantAgent, to_langchain_history
 from .service import (
@@ -114,10 +114,10 @@ class FeishuBridge:
         self,
         settings: Settings | None = None,
         *,
-        google_client: McpGoogleClient | None = None,
+        mail_client: McpFeishuClient | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.google_client = google_client
+        self.mail_client = mail_client
         self.loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._api = None
@@ -132,8 +132,8 @@ class FeishuBridge:
         if not self.settings.feishu_configured:
             logger.info("Feishu bridge disabled: credentials or allowlist missing")
             return
-        if self.google_client is None:
-            raise RuntimeError("Feishu bridge needs the Google MCP client")
+        if self.mail_client is None:
+            raise RuntimeError("Feishu bridge needs the Feishu Mail MCP client")
         try:
             import lark_oapi as lark
             from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -147,6 +147,7 @@ class FeishuBridge:
             lark.Client.builder()
             .app_id(self.settings.feishu_app_id)
             .app_secret(self.settings.feishu_app_secret)
+            .domain(self.settings.feishu_open_base_url)
             .build()
         )
         handler = (
@@ -161,6 +162,7 @@ class FeishuBridge:
             self.settings.feishu_app_id,
             self.settings.feishu_app_secret,
             event_handler=handler,
+            domain=self.settings.feishu_open_base_url,
             log_level=lark.LogLevel.INFO,
         )
 
@@ -285,7 +287,7 @@ class FeishuBridge:
         text: str,
         event_id: str,
     ) -> None:
-        if self.google_client is None:
+        if self.mail_client is None:
             return
         await self._send_text(chat_id, "收到，正在处理…")
         with SessionLocal() as session:
@@ -317,7 +319,7 @@ class FeishuBridge:
             agent = AssistantAgent(
                 session,
                 conversation,
-                self.google_client,
+                self.mail_client,
                 source_message_id=user_row.id,
             )
             streamed: list[str] = []
@@ -360,7 +362,7 @@ class FeishuBridge:
                 await self._send_card(chat_id, action_card(action))
 
     async def _execute_and_notify(self, action_id: str, chat_id: str) -> None:
-        if self.google_client is None:
+        if self.mail_client is None:
             return
         try:
             with SessionLocal() as session:
@@ -368,7 +370,7 @@ class FeishuBridge:
                 if action.status.value != "approved":
                     return
                 action = await execute_approved_action(
-                    session, action_id, self.google_client
+                    session, action_id, self.mail_client
                 )
                 session.commit()
                 if action.status.value == "applied":

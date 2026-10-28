@@ -20,7 +20,7 @@ const kind = computed(() => String(preview.value.kind ?? 'tool'))
 const title = computed(() => {
   if (kind.value === 'email_draft') return '待保存的邮件草稿'
   if (kind.value === 'email_send') return '待发送的邮件回复'
-  if (kind.value === 'email_send_draft') return '待发送的 Gmail 草稿'
+  if (kind.value === 'email_send_draft') return '待发送的飞书邮箱草稿'
   if (kind.value === 'calendar_event') return '待创建的日历会议'
   return '待确认操作'
 })

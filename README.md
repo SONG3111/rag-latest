@@ -18,6 +18,7 @@
 - **工作区隔离**：每个工作区是磁盘上一个独立目录，Agent 的所有路径都锁在沙箱内。
 - **工具可见**：界面上能看到 Agent 正在调用哪个工具，以及当前启用的完整工具清单与审批级别。
 - **会议助手**：同时采集麦克风与系统声音，本地流式转写，停止后生成带时间戳的结构化纪要，并支持基于转写追问和 Markdown 导出。
+- **新闻雷达**：多选十个行业或自定义主题，默认通过中国新闻网 RSS 与自托管 DailyHotApi 聚合国内新闻和热榜，跨来源聚类为事件卡；用户直接提问时即时生成快照，并支持短时缓存复用与定向补搜。
 
 ## 架构
 
@@ -126,7 +127,7 @@ LangChain 并不会透出（`additional_kwargs` 为空），无法显示给用�
 | Embedding | **本地** `BAAI/bge-m3`（1024 维） | 权重在本地，建索引不出网 |
 | Reranker | **本地** `BAAI/bge-reranker-v2-m3` | 交叉编码器，本地推理 |
 | 文档工具 | MCP Server（FastMCP + openpyxl + python-docx），stdio | 精选 22 个工具（7 只读 + 15 写入需审批） |
-| 邮件 / 日程工具 | 独立 `mcp-google-server`（Gmail API + Calendar API），stdio | 5 个只读 + 4 个写入需审批 |
+| 邮件 / 日程工具 | 独立 `mcp-feishu-server`（飞书 Mail API + Calendar API），stdio | 5 个只读 + 4 个写入需审批 |
 | 消息入口 | 飞书官方 `lark-oapi` WebSocket 长连接 | 无需公网回调；白名单用户与群 |
 | 会议转写 | `WhisperLiveKit` + `faster-whisper` | 本地 PCM 流式 ASR；音频不落盘 |
 | 向量库 | Qdrant local（嵌入式） | 每个工作区一个 collection |
@@ -187,7 +188,7 @@ huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir C:/code/agent/rag/m
 # 用独立环境（推荐 Python 3.12）
 conda create -p .venv312 python=3.12 -y
 ./.venv312/python.exe -m pip install -e ./mcp-office-server
-./.venv312/python.exe -m pip install -e ./mcp-google-server
+./.venv312/python.exe -m pip install -e ./mcp-feishu-server
 ./.venv312/python.exe -m pip install -r backend/requirements.txt
 
 # 启动（Windows）
@@ -236,30 +237,41 @@ python scripts/make_demo_data.py
 4. 让 Agent 把这些记录的状态改成"需总经理审批" → 右侧出现 Diff 卡片，**确认前文件不会变动**
 5. 点"应用修改" → 写入文件并自动备份，可随时还原
 
-## 邮件助手（Gmail + Google Calendar + 飞书）
+## 邮件助手（飞书邮箱 + 飞书日历）
 
-顶部切换到“邮件助手”后，可以搜索/阅读 Gmail、准备回复草稿、查询空闲时间并创建会议。
-飞书机器人使用官方 SDK 的长连接接收文字指令；保存草稿、发送邮件、创建会议都会先落成
-持久化提案，在 Web 或飞书卡片中批准后才真正调用 Google API。
+顶部切换到“邮件助手”后，可以搜索/阅读飞书邮箱、准备回复草稿、查询空闲时间并创建
+飞书会议。飞书机器人使用官方 SDK 的长连接接收文字指令；保存草稿、发送邮件、创建会议
+都会先落成持久化提案，在 Web 或飞书卡片中批准后才真正调用飞书 API。
 
 V1 没有使用 A2A。A2A 解决的是独立 Agent 之间的发现与任务委派；这里是单 Agent 使用工具，
 主流且更简单的组合是 **MCP（工具）+ WebSocket/Webhook（消息入口）+ REST/SSE（UI）+
 数据库审批记录 + LangGraph（编排）**。以后需要跨服务 Agent 协作时，再在外部加 A2A 网关。
 
-### Google 授权
+### 飞书邮箱与用户授权
 
-1. 在 Google Cloud Console 创建 OAuth 客户端，类型选 **Desktop app**。
-2. 启用 Gmail API 与 Google Calendar API。
-3. 配置 `.env` 并执行一次性授权：
+1. 在飞书开放平台自建应用里开通 Mail 与 Calendar 所需权限。
+2. 配置邮箱地址、应用凭证和 OAuth scope：
 
-```powershell
-$env:GOOGLE_CLIENT_SECRETS_PATH="C:\path\to\client_secret.json"
-$env:GOOGLE_TOKEN_PATH="C:\Users\songqulv\Desktop\notion\rag-latest\data\secrets\google_token.json"
-./.venv312/python.exe -m mcp_google_server.auth
+```ini
+FEISHU_APP_ID=cli_xxxxxxxxx
+FEISHU_APP_SECRET=xxxxxxxxx
+FEISHU_MAIL_USER_MAILBOX_ID=you@example.com
+FEISHU_CALENDAR_ID=
+FEISHU_OAUTH_SCOPES=
 ```
 
-令牌只保存在 `data/secrets/`（已忽略），不会提交仓库。权限限定为 Gmail 只读/草稿/发送
-和 Calendar 只读/事件。V1 不支持附件、新外发邮件、转发、改期或取消日程。
+3. 执行飞书 OAuth Device Flow：
+
+```powershell
+./.venv312/python.exe -m mcp_feishu_server.auth
+```
+
+命令会打印飞书验证链接和用户码，确认授权后把 access/refresh token 保存到
+`data/secrets/feishu_user_token.json`。令牌不会提交仓库，并会在过期前自动刷新。
+`FEISHU_CALENDAR_ID` 留空时自动读取当前用户的主日历。
+
+V1 使用的是飞书官方 Mail v1 API，不依赖 Gmail、Google Calendar、IMAP 或海外代理。
+仍不支持附件、新外发邮件、转发、改期或取消日程。
 
 ### 飞书长连接
 
@@ -328,24 +340,26 @@ CUDA/CTranslate2 环境，可通过 `MEETING_ASR_DEVICE=cuda` 和
 │   │   ├── word_ops.py       # python-docx 实现层（含跨 run 替换）
 │   │   └── errors.py         # 统一错误语义
 │   └── tests/
-├── mcp-google-server/        # 独立 MCP 服务：Gmail / Google Calendar
-│   ├── src/mcp_google_server/
+├── mcp-feishu-server/        # 独立 MCP 服务：飞书邮箱 / 飞书日历
+│   ├── src/mcp_feishu_server/
 │   │   ├── server.py         # 9 个工具及只读/审批注解
-│   │   ├── gmail_ops.py      # 搜索、MIME 正文、线程回复与草稿
-│   │   ├── calendar_ops.py   # 日程、free/busy、空闲时段、创建会议
-│   │   └── auth.py           # 本地 OAuth Desktop App 流程
+│   │   ├── mail_ops.py       # 搜索、线程回复、草稿和发送
+│   │   ├── calendar_ops.py   # 日程、空闲时段、创建会议
+│   │   └── auth.py           # 飞书 OAuth Device Flow 与令牌刷新
 │   └── tests/
 ├── backend/
 │   ├── app/
 │   │   ├── agent/graph.py    # LangGraph 图 + 工具门控
 │   │   ├── assistant/        # 邮件助手图、审批执行器、飞书长连接
 │   │   ├── meeting/          # 实时 ASR、纪要与会议转写追问
+│   │   ├── news/             # 多源新闻采集、事件聚类、日报与追问
 │   │   ├── mcp_client.py     # MCP 子进程生命周期 + 注解解析
 │   │   ├── retrieval/        # 分块 / BM25 / 向量库 / RRF 管线
 │   │   ├── services/         # 文件入库、备份、审批操作
 │   │   └── api/routes.py     # REST + SSE
 │   └── tests/
 ├── frontend/src/             # Vue 三栏界面
+├── docker-compose.yml        # 含 DailyHotApi v2.0.8 国内热榜 sidecar
 └── scripts/                  # 演示数据、检索评测、冒烟脚本
 ```
 
@@ -387,8 +401,8 @@ cd frontend && npm run check:sse && npm run check:meeting-pcm && npm run check:s
 # MCP 服务：沙箱与文档读写
 ./.venv312/python.exe -m pytest mcp-office-server/tests -q
 
-# Google MCP：Gmail MIME、回复线程、空闲时间、事件创建（fake Google API）
-./.venv312/python.exe -m pytest mcp-google-server/tests -q
+# 飞书 MCP：邮件搜索、线程回复、日历与审批注解（fake Feishu API）
+./.venv312/python.exe -m pytest mcp-feishu-server/tests -q
 
 # 后端：检索、审批闭环、Agent 门控、HTTP 端到端
 ./.venv312/python.exe -m pytest backend/tests -q
@@ -407,6 +421,7 @@ cd frontend && npm run check:sse && npm run check:meeting-pcm && npm run check:s
 - **查询改写**：改写结果同时作用于向量与关键词两路、对话历史传入改写器、关闭时零模型调用、失败与异常输出回退原查询
 - **审批闭环**：提案不落盘、拒绝后文件字节不变、应用前备份、重复应用被拒、还原生效
 - **邮件助手**：读工具直通、写工具只生成提案、批准只执行一次、过期/重复批准被拒、飞书白名单与卡片回调
+- **新闻雷达**：RSS/Atom 解析、URL 与近似标题去重、事件聚类、非法模型输出降级、全源失败、提问触发快照、30 天清理、Agent 缓存优先检索
 - **Agent 门控**：只读工具直通、写入工具被拦截、提案携带 Diff、未知工具不崩溃、迭代上限生效
 - **本地模型**：维度与配置一致、语义相近文本余弦相似度更高、重排把依据条款排到第一位
 - **端到端**：建工作区 → 上传 Excel+Word → 索引 → 工具清单 → 删除
@@ -425,9 +440,9 @@ cd frontend && npm run check:sse && npm run check:meeting-pcm && npm run check:s
 | `POST` | `/api/assistant/chat/stream` | 邮件助手 SSE 对话，事件 `token / tool_call / tool_result / proposal / done / error` |
 | `GET` | `/api/assistant/messages` | 网页会话历史 |
 | `GET` | `/api/assistant/actions` | 待审批与历史操作（可按状态筛选） |
-| `POST` | `/api/assistant/actions/{id}/apply|reject` | 批准/拒绝 Google 写入 |
-| `GET` | `/api/assistant/tools` | Gmail/Calendar 工具及审批级别 |
-| `GET` | `/api/assistant/health` | Google MCP、OAuth、飞书连接与待审批数量 |
+| `POST` | `/api/assistant/actions/{id}/apply|reject` | 批准/拒绝飞书写入 |
+| `GET` | `/api/assistant/tools` | 飞书邮箱/日历工具及审批级别 |
+| `GET` | `/api/assistant/health` | 飞书 MCP、用户授权、长连接与待审批数量 |
 | `GET/POST` | `/api/meetings` | 会议列表 / 新建会议 |
 | `GET/PATCH/DELETE` | `/api/meetings/{id}` | 会议详情、标题/笔记更新、删除 |
 | `WS` | `/api/meetings/{id}/audio` | 16kHz PCM 音频流与实时转写事件 |
@@ -435,6 +450,13 @@ cd frontend && npm run check:sse && npm run check:meeting-pcm && npm run check:s
 | `POST` | `/api/meetings/{id}/chat/stream` | 基于本场转写的 SSE 追问 |
 | `GET` | `/api/meetings/{id}/export.md` | 导出完整会议 Markdown |
 | `GET` | `/api/meetings/health` | 本地 ASR 模型、设备与加载状态 |
+| `GET` | `/api/news/categories` | 十个新闻分类、默认选择与自定义主题上限 |
+| `GET/PUT` | `/api/news/preferences` | 读取/保存即时生成使用的分类选择 |
+| `GET` | `/api/news/digests/latest?date=YYYY-MM-DD` | 读取指定日期最新可用新闻快照 |
+| `POST` | `/api/news/digests/refresh` | 启动手动刷新，`202` 返回可轮询的 digest |
+| `GET` | `/api/news/digests/{id}` | 查询采集、聚类与降级状态 |
+| `POST/GET` | `/api/news/chat/stream` · `/api/news/messages` | 新闻追问 SSE 与持久化历史 |
+| `GET` | `/api/news/health` | 调度器、最近任务与错误状态 |
 
 Agent 的工具选择测试用脚本化的假模型驱动，因此**不需要 API key** 也能验证控制流。
 
@@ -554,8 +576,11 @@ python scripts/eval_retrieval.py --dense --sweep      # 阈值扫描
 | `ASSISTANT_MAX_ITERATIONS` | `8` | 邮件助手工具循环上限 |
 | `ASSISTANT_ACTION_TTL_HOURS` | `24` | 待审批提案过期时间 |
 | `ASSISTANT_TIMEZONE` | `Asia/Shanghai` | 日程与相对日期默认时区 |
-| `GOOGLE_TOKEN_PATH` | `data/secrets/google_token.json` | Google OAuth 令牌文件 |
-| `GOOGLE_CLIENT_SECRETS_PATH` | 空 | OAuth Desktop App 客户端配置，仅授权命令使用 |
+| `FEISHU_MAIL_USER_MAILBOX_ID` | 空 | 飞书邮箱地址 / user_mailbox_id |
+| `FEISHU_CALENDAR_ID` | 空 | 可选；空时自动读取当前用户主日历 |
+| `FEISHU_USER_TOKEN_PATH` | `data/secrets/feishu_user_token.json` | 飞书用户 access/refresh token |
+| `FEISHU_OAUTH_SCOPES` | 空 | Device Flow 申请的 scope ID，按飞书后台填写 |
+| `FEISHU_OPEN_BASE_URL` | `https://open.feishu.cn` | 飞书大陆区 OpenAPI 地址；Lark 国际站可覆盖 |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 空 | 飞书自建应用凭证；为空则桥接停用 |
 | `FEISHU_ALLOWED_OPEN_IDS` | 空 | 允许发指令的用户 open_id，逗号分隔 |
 | `FEISHU_ALLOWED_CHAT_IDS` | 空 | 可选群白名单；为空表示允许白名单用户所在任意群 |
@@ -574,6 +599,19 @@ python scripts/eval_retrieval.py --dense --sweep      # 阈值扫描
 | `MEETING_MAX_MINUTES` | `180` | 单场录音时长上限 |
 | `MEETING_SUMMARY_MODEL` | 空 | 纪要/追问模型；空则复用现有模型链 |
 | `MEETING_SUMMARY_TIMEOUT` | `300` | 单次纪要生成超时秒数 |
+| `NEWS_ENABLED` | `true` | 是否启用新闻雷达 |
+| `NEWS_TIMEZONE` | `Asia/Shanghai` | 新闻时间窗口使用的时区 |
+| `NEWS_CACHE_MINUTES` | `15` | 同一分类的追问复用缓存分钟数 |
+| `NEWS_WINDOW_HOURS` | `24` | 新闻采集时间窗口 |
+| `NEWS_CANDIDATE_LIMIT` | `18` | 每类提交给编辑模型的候选上限 |
+| `NEWS_MAX_EVENTS_PER_CATEGORY` | `5` | 每类最终事件上限 |
+| `NEWS_IMPORTANCE_THRESHOLD` | `6.0` | 0–10 重要性门槛；不足时不填充低质内容 |
+| `NEWS_RETENTION_DAYS` | `30` | 新闻快照与文章缓存保留天数 |
+| `NEWS_HOT_API_BASE_URL` | `http://127.0.0.1:6688` | 自托管 DailyHotApi 地址；Compose 内自动改为 `http://dailyhot-api:6688` |
+| `NEWS_ENABLE_GOOGLE` | `false` | 是否补充 Google News；国内无代理默认关闭 |
+| `NEWS_ENABLE_GLOBAL` | `false` | 是否补充 BBC、TechCrunch、The Verge、WHO、Hacker News 等海外源 |
+| `NEWS_EXTRA_RSS` | 空 | 逗号分隔的额外 RSS 地址 |
+| `NEWS_MODEL` | 空 | 新闻筛选/摘要模型；空则复用主模型链 |
 
 切换回云端 embedding / rerank 只需改两个变量（需 `DASHSCOPE_API_KEY`）：
 
@@ -587,8 +625,17 @@ RERANKER_PROVIDER=dashscope
 ## 已知限制
 
 - 单用户本地运行，没有账号体系与多租户隔离。
-- 邮件助手只支持 Gmail/Google Calendar；不监控新邮件、不处理附件、不创建新外发邮件、
+- 邮件助手支持飞书邮箱与飞书主日历；不监控新邮件、不处理附件、不创建新外发邮件、
   不修改或取消已有日程。邮件正文会发送给当前配置的云端 LLM。
+- 空闲时间目前只合并当前用户的主日历，不自动读取其他参会人的日历；创建会议时仍可
+  通过邮箱地址邀请外部参会人。
+- 新闻雷达默认使用中国新闻网 RSS 与自托管 DailyHotApi。DailyHotApi 是 MIT 许可的
+  热榜聚合器，`docker compose up` 会启动固定版本 `imsyy/dailyhot-api:v2.0.8`；
+  非 Docker 运行需自行启动监听 `6688` 的服务。单个来源失败会降级，全部失败时保留失败快照。
+  Google News 和海外 RSS 默认关闭，可通过环境变量开启。
+  热榜条目没有可靠发布时间时使用抓取时间，并在 UI 标记为“热榜抓取”。
+  提问会触发一次即时采集，首次生成通常比后续追问慢。
+  新闻摘要不是事实核验服务，单一来源事件需要结合原文判断。
 - 文档修改限定在结构化编辑（值、区域、段落、表格、基础格式）。
   上游实现里的图表、透视表、文档保护等能力保留在代码中但未注册为工具——工具过多会明显拉低模型的工具选择准确率。
 - 只有对话与查询改写需要 `DASHSCOPE_API_KEY`；嵌入与重排走本地权重。未配置 key 时

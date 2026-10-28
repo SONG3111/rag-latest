@@ -109,6 +109,21 @@ def test_migration_creates_indexes(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_news_articles_get_time_basis_column(tmp_path: Path) -> None:
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'news-legacy.db').as_posix()}", future=True
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE news_articles (id VARCHAR(32) PRIMARY KEY)")
+        )
+
+    assert "news_articles.time_basis" in apply_additive_migrations(engine)
+    columns = {item["name"] for item in inspect(engine).get_columns("news_articles")}
+    assert "time_basis" in columns
+    engine.dispose()
+
+
 LEGACY_WORKSPACES_DDL = """
 CREATE TABLE workspaces (
     id VARCHAR(32) PRIMARY KEY,

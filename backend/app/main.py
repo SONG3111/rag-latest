@@ -18,7 +18,8 @@ from .db import init_db, session_scope
 from .meeting.asr import WhisperLiveKitTranscriber
 from .meeting.routes import router as meeting_router
 from .meeting.service import recover_interrupted_meetings
-from .mcp_client import McpGoogleClient, McpOfficeClient, McpStartupError
+from .mcp_client import McpFeishuClient, McpOfficeClient, McpStartupError
+from .news.routes import router as news_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,29 +64,29 @@ async def lifespan(app: FastAPI):
         app.state.mcp_error = None
     app.state.mcp_client = client
 
-    google_client = McpGoogleClient(settings)
+    assistant_client = McpFeishuClient(settings)
     if settings.assistant_enabled:
         try:
-            await google_client.start()
+            await assistant_client.start()
         except McpStartupError as exc:
-            logger.error("Google MCP server unavailable: %s", exc)
-            app.state.google_mcp_error = str(exc)
+            logger.error("Feishu Mail MCP server unavailable: %s", exc)
+            app.state.assistant_mcp_error = str(exc)
         else:
-            app.state.google_mcp_error = None
+            app.state.assistant_mcp_error = None
     else:
-        app.state.google_mcp_error = "assistant disabled"
-    app.state.google_mcp_client = google_client
+        app.state.assistant_mcp_error = "assistant disabled"
+    app.state.assistant_mcp_client = assistant_client
 
     # The ASR engine is lazy: constructing this adapter does not import or load
     # Whisper until the first recording starts.
     app.state.meeting_transcriber = WhisperLiveKitTranscriber(settings)
 
-    bridge = FeishuBridge(settings, google_client=google_client)
+    bridge = FeishuBridge(settings, mail_client=assistant_client)
     app.state.feishu_bridge = bridge
     if (
         settings.assistant_enabled
-        and google_client.started
-        and settings.effective_google_token_path.exists()
+        and assistant_client.started
+        and settings.feishu_mail_configured
     ):
         try:
             bridge.start(asyncio.get_running_loop())
@@ -98,14 +99,14 @@ async def lifespan(app: FastAPI):
         app.state.feishu_error = (
             "assistant disabled"
             if not settings.assistant_enabled
-            else ("Google MCP is unavailable" if not google_client.started else None)
+            else ("Feishu Mail MCP is unavailable" if not assistant_client.started else None)
         )
 
     try:
         yield
     finally:
-        if google_client.started:
-            await google_client.stop()
+        if assistant_client.started:
+            await assistant_client.stop()
         # Close in reverse order of startup: stdio_client uses anyio cancel
         # scopes, which must unwind LIFO within the lifespan task.
         await client.stop()
@@ -136,11 +137,12 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(assistant_router)
     app.include_router(meeting_router)
+    app.include_router(news_router)
 
     @app.get("/health")
     def health() -> dict:
         client = getattr(app.state, "mcp_client", None)
-        google = getattr(app.state, "google_mcp_client", None)
+        assistant = getattr(app.state, "assistant_mcp_client", None)
         bridge = getattr(app.state, "feishu_bridge", None)
         meeting = getattr(app.state, "meeting_transcriber", None)
         settings = get_settings()
@@ -151,9 +153,9 @@ def create_app() -> FastAPI:
             "tools": len(client.profiles()) if client and client.started else 0,
             "assistant": {
                 "enabled": settings.assistant_enabled,
-                "google_mcp_started": bool(google and google.started),
-                "google_auth_ready": settings.effective_google_token_path.exists(),
-                "google_error": getattr(app.state, "google_mcp_error", None),
+                "mail_mcp_started": bool(assistant and assistant.started),
+                "mail_auth_ready": settings.feishu_mail_configured,
+                "mail_error": getattr(app.state, "assistant_mcp_error", None),
                 "feishu_configured": settings.feishu_configured,
                 "feishu_connected": bool(bridge and bridge.connected),
                 "feishu_error": getattr(app.state, "feishu_error", None),
@@ -163,6 +165,12 @@ def create_app() -> FastAPI:
                 if meeting is not None
                 else {"enabled": settings.meeting_enabled, "ready": False}
             ),
+            "news": {
+                "enabled": settings.news_enabled,
+                "timezone": settings.news_timezone,
+                "generation_mode": "on_demand",
+                "cache_minutes": settings.news_cache_minutes,
+            },
         }
 
     return app

@@ -10,6 +10,11 @@ import type {
   MeetingDetail,
   MeetingHealth,
   MeetingListItem,
+  NewsCategories,
+  NewsDigest,
+  NewsHealth,
+  NewsMessage,
+  NewsPreference,
   Operation,
   StoredMessage,
   Workspace,
@@ -166,4 +171,30 @@ export const api = {
 
   meetingExportUrl: (meetingId: string) =>
     `${BASE}/meetings/${meetingId}/export.md`,
+
+  newsCategories: () => request<NewsCategories>('/api/news/categories'),
+
+  newsPreferences: () => request<NewsPreference>('/api/news/preferences'),
+
+  updateNewsPreferences: (categories: string[], customTopics: string[]) =>
+    request<NewsPreference>('/api/news/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ categories, custom_topics: customTopics }),
+    }),
+
+  latestNewsDigest: (date?: string) =>
+    request<NewsDigest>(
+      `/api/news/digests/latest${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
+
+  refreshNewsDigest: () =>
+    request<NewsDigest>('/api/news/digests/refresh', { method: 'POST' }),
+
+  getNewsDigest: (digestId: string) =>
+    request<NewsDigest>(`/api/news/digests/${digestId}`),
+
+  newsMessages: () => request<NewsMessage[]>('/api/news/messages'),
+
+  newsHealth: () => request<NewsHealth>('/api/news/health'),
 }

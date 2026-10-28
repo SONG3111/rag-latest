@@ -6,10 +6,11 @@ import InspectorPanel from './components/InspectorPanel.vue'
 import WorkspaceSidebar from './components/WorkspaceSidebar.vue'
 import AssistantView from './components/AssistantView.vue'
 import MeetingView from './components/MeetingView.vue'
+import NewsView from './components/NewsView.vue'
 import { useWorkspaceStore } from './stores/workspace'
 
 const store = useWorkspaceStore()
-const mode = ref<'workspace' | 'assistant' | 'meeting'>('workspace')
+const mode = ref<'workspace' | 'assistant' | 'meeting' | 'news'>('workspace')
 
 onMounted(async () => {
   await store.refreshHealth()
@@ -32,6 +33,7 @@ onMounted(async () => {
         <a-radio-button value="workspace">文档工作区</a-radio-button>
         <a-radio-button value="assistant">邮件助手</a-radio-button>
         <a-radio-button value="meeting">会议助手</a-radio-button>
+        <a-radio-button value="news">新闻雷达</a-radio-button>
       </a-radio-group>
     </header>
     <div v-if="mode === 'workspace'" class="app-shell workspace-host">
@@ -40,7 +42,8 @@ onMounted(async () => {
       <InspectorPanel />
     </div>
     <AssistantView v-else-if="mode === 'assistant'" />
-    <MeetingView v-else />
+    <MeetingView v-else-if="mode === 'meeting'" />
+    <NewsView v-else />
   </div>
 </template>
 

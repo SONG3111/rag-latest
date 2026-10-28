@@ -15,7 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..config import get_settings
 from ..db import get_session
 from ..llm.resilience import translate_provider_error
-from ..mcp_client import McpGoogleClient
+from ..mcp_client import McpFeishuClient
 from ..models import (
     AssistantAction,
     AssistantActionStatus,
@@ -47,11 +47,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/assistant")
 
 
-def _client(request: Request) -> McpGoogleClient:
-    client = getattr(request.app.state, "google_mcp_client", None)
+def _client(request: Request) -> McpFeishuClient:
+    client = getattr(request.app.state, "assistant_mcp_client", None)
     if client is None or not client.started:
         raise HTTPException(
-            status_code=503, detail="Google MCP server is not available"
+            status_code=503, detail="Feishu Mail MCP server is not available"
         )
     return client
 
@@ -261,7 +261,7 @@ def reject(
 @router.get("/tools", response_model=list[AssistantToolRead])
 def tools(request: Request) -> list[AssistantToolRead]:
     settings = get_settings()
-    client = getattr(request.app.state, "google_mcp_client", None)
+    client = getattr(request.app.state, "assistant_mcp_client", None)
     if not settings.assistant_enabled or client is None or not client.started:
         return []
     return [
@@ -283,11 +283,16 @@ async def health(
     session: Session = Depends(get_session),
 ) -> AssistantHealthRead:
     settings = get_settings()
-    client = getattr(request.app.state, "google_mcp_client", None)
+    client = getattr(request.app.state, "assistant_mcp_client", None)
     bridge = getattr(request.app.state, "feishu_bridge", None)
-    google_error = getattr(request.app.state, "google_mcp_error", None)
-    if google_error is None and not settings.effective_google_token_path.exists():
-        google_error = "Google OAuth is not ready"
+    mail_error = getattr(request.app.state, "assistant_mcp_error", None)
+    if mail_error is None and not settings.feishu_mail_configured:
+        if not settings.feishu_app_id or not settings.feishu_app_secret:
+            mail_error = "Feishu app credentials are not configured"
+        elif not settings.feishu_mail_user_mailbox_id:
+            mail_error = "Feishu mailbox id is not configured"
+        else:
+            mail_error = "Feishu user authorization is not ready"
     expire_stale_actions(session)
     pending = session.scalar(
         select(func.count(AssistantAction.id)).where(
@@ -296,9 +301,9 @@ async def health(
     )
     return AssistantHealthRead(
         enabled=settings.assistant_enabled,
-        google_mcp_started=bool(client and client.started),
-        google_auth_ready=settings.effective_google_token_path.exists(),
-        google_error=google_error,
+        mail_mcp_started=bool(client and client.started),
+        mail_auth_ready=settings.feishu_mail_configured,
+        mail_error=mail_error,
         feishu_configured=settings.feishu_configured,
         feishu_connected=bool(bridge and bridge.connected),
         feishu_error=(

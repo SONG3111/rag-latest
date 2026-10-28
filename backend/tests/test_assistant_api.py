@@ -102,7 +102,7 @@ async def test_assistant_action_http_approval_is_idempotent(app_with_temp_storag
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
         async with app.router.lifespan_context(app):
-            app.state.google_mcp_client = client
+            app.state.assistant_mcp_client = client
             session = app.state.test_session_factory()
             try:
                 conversation = get_or_create_conversation(
@@ -171,7 +171,7 @@ async def test_assistant_chat_stream_creates_pending_action(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
         async with app.router.lifespan_context(app):
-            app.state.google_mcp_client = fake
+            app.state.assistant_mcp_client = fake
             response = await http.post(
                 "/api/assistant/chat/stream",
                 json={"message": "帮我回复这封邮件"},
@@ -201,18 +201,18 @@ async def test_assistant_health_keeps_document_fields(app_with_temp_storage) -> 
             body = response.json()
             assert "mcp_started" in body
             assert "assistant" in body
-            assert "google_auth_ready" in body["assistant"]
+            assert "mail_auth_ready" in body["assistant"]
             assistant_health = await http.get("/api/assistant/health")
             assert assistant_health.status_code == 200
             assert assistant_health.json()["pending_actions"] == 0
 
 
-async def test_google_mcp_exposes_expected_approval_annotations(
+async def test_feishu_mail_mcp_exposes_expected_approval_annotations(
     app_with_temp_storage,
 ) -> None:
     app = app_with_temp_storage
     async with app.router.lifespan_context(app):
-        profiles = app.state.google_mcp_client.profiles()
+        profiles = app.state.assistant_mcp_client.profiles()
         assert {
             "search_emails",
             "read_email",
@@ -242,7 +242,7 @@ async def test_real_mcp_tools_can_be_wrapped_for_the_agent(
             agent = AssistantAgent(
                 session,
                 conversation,
-                app.state.google_mcp_client,
+                app.state.assistant_mcp_client,
                 llm=ScriptedLLM([]),
             )
             tools = agent.build_tools()
@@ -257,11 +257,11 @@ async def test_real_mcp_tools_can_be_wrapped_for_the_agent(
                 "send_draft",
                 "create_calendar_event",
             }
-            raw = await app.state.google_mcp_client.tool("search_emails").ainvoke(
+            raw = await app.state.assistant_mcp_client.tool("search_emails").ainvoke(
                 {"query": "is:unread"}
             )
             payload = parse_tool_result(raw)
             assert payload["ok"] is False
-            assert payload["error"]["code"] == "google_auth_not_ready"
+            assert payload["error"]["code"] == "feishu_auth_not_ready"
         finally:
             session.close()

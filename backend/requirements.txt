@@ -23,9 +23,9 @@ python-dateutil>=2.9
 # Imported directly for proposal rebasing (formula reference shifting);
 # the MCP subprocess runs from this same package.
 mcp-office-server>=0.1.0
-# Gmail / Google Calendar tools run in a second MCP subprocess. Keeping the
-# package separate from the document sandbox also isolates OAuth credentials.
-mcp-google-server>=0.1.0
+# Feishu Mail / Calendar tools run in a second MCP subprocess using the official
+# Lark/Feishu OpenAPI SDK and a locally stored user token.
+mcp-feishu-server>=0.1.0
 
 # --- Feishu long connection ---
 # Official Lark/Feishu SDK. The bridge is disabled unless app credentials and a
@@ -47,6 +47,10 @@ opencc>=1.4.2,<2
 # --- retrieval ---
 qdrant-client>=1.12
 jieba>=0.42.1
+
+# --- news radar ---
+feedparser>=6.0.11
+trafilatura>=2.0
 
 # --- local embedding / reranking (used when EMBEDDING_PROVIDER=local
 #     or RERANKER_PROVIDER=local-bge) ---

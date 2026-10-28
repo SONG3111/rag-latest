@@ -33,15 +33,15 @@ onMounted(() => {
       <div class="panel-body side-body">
         <div class="section-title">服务状态</div>
         <div class="status-row">
-          <span>Google 工具</span>
-          <a-tag :color="statusType(health?.google_mcp_started)" size="small">
-            {{ health?.google_mcp_started ? '已连接' : '未连接' }}
+          <span>飞书邮箱工具</span>
+          <a-tag :color="statusType(health?.mail_mcp_started)" size="small">
+            {{ health?.mail_mcp_started ? '已连接' : '未连接' }}
           </a-tag>
         </div>
         <div class="status-row">
-          <span>Google 授权</span>
-          <a-tag :color="statusType(health?.google_auth_ready)" size="small">
-            {{ health?.google_auth_ready ? '已就绪' : '需授权' }}
+          <span>飞书用户授权</span>
+          <a-tag :color="statusType(health?.mail_auth_ready)" size="small">
+            {{ health?.mail_auth_ready ? '已就绪' : '需授权' }}
           </a-tag>
         </div>
         <div class="status-row">
@@ -50,10 +50,10 @@ onMounted(() => {
             {{ health?.feishu_configured ? (health?.feishu_connected ? '在线' : '离线') : '未配置' }}
           </a-tag>
         </div>
-        <div v-if="health?.google_error" class="warning">{{ health.google_error }}</div>
+        <div v-if="health?.mail_error" class="warning">{{ health.mail_error }}</div>
         <div v-if="health?.feishu_error" class="warning">{{ health.feishu_error }}</div>
-        <div v-if="health && !health.google_auth_ready" class="hint">
-          先运行 <code>python -m mcp_google_server.auth</code> 完成 Google 授权。
+        <div v-if="health && !health.mail_auth_ready" class="hint">
+          先运行 <code>python -m mcp_feishu_server.auth</code> 完成飞书用户授权。
         </div>
 
         <div class="section-title pending-title">

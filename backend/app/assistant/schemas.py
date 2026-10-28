@@ -68,9 +68,9 @@ class AssistantToolRead(BaseModel):
 
 class AssistantHealthRead(BaseModel):
     enabled: bool
-    google_mcp_started: bool
-    google_auth_ready: bool
-    google_error: str | None = None
+    mail_mcp_started: bool
+    mail_auth_ready: bool
+    mail_error: str | None = None
     feishu_configured: bool
     feishu_connected: bool
     feishu_error: str | None = None

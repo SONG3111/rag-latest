@@ -7,6 +7,9 @@ services:
       - .env
     environment:
       DATA_DIR: /app/data
+      # DailyHotApi is an internal sidecar. Local non-Docker runs use the
+      # NEWS_HOT_API_BASE_URL value from .env (defaults to 127.0.0.1:6688).
+      NEWS_HOT_API_BASE_URL: http://dailyhot-api:6688
     volumes:
       # Workspaces, backups, and the vector index all live here.
       - ./data:/app/data
@@ -16,6 +19,16 @@ services:
       - ${LOCAL_MODELS_DIR:-C:/code/agent/rag/models}:/models:ro
     ports:
       - "8000:8000"
+    restart: unless-stopped
+    depends_on:
+      - dailyhot-api
+
+  dailyhot-api:
+    # MIT licensed domestic hot-list aggregator. Pin the release rather than
+    # tracking latest so source-route changes are explicit upgrades.
+    image: imsyy/dailyhot-api:v2.0.8
+    ports:
+      - "6688:6688"
     restart: unless-stopped
 
   frontend:

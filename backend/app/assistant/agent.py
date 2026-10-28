@@ -25,7 +25,7 @@ from ..agent.graph import AgentEvent
 from ..config import Settings, get_settings
 from ..llm.providers import build_chat_model, build_resilient_chat_model
 from ..llm.resilience import translate_provider_error
-from ..mcp_client import McpGoogleClient, parse_tool_result
+from ..mcp_client import McpFeishuClient, parse_tool_result
 from ..models import AssistantConversation, AssistantMessage, MessageRole
 from .prompts import build_system_prompt
 from .service import create_action
@@ -105,7 +105,7 @@ class AssistantAgent:
         self,
         session: Session,
         conversation: AssistantConversation,
-        client: McpGoogleClient,
+        client: McpFeishuClient,
         *,
         llm: Any | None = None,
         settings: Settings | None = None,
@@ -156,7 +156,7 @@ class AssistantAgent:
                         "preview": action.preview,
                         "expires_at": action.expires_at.isoformat(),
                     },
-                    "note": "已生成待确认提案，尚未执行任何 Gmail/Calendar 写入。",
+                    "note": "已生成待确认提案，尚未执行任何飞书邮箱/日历写入。",
                 },
                 ensure_ascii=False,
                 default=str,

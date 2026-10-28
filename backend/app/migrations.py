@@ -49,6 +49,11 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str | None]]] = {
         # Thumbs feedback on assistant turns; NULL keeps pre-feedback rows valid.
         ("feedback", "VARCHAR(10)", None),
     ],
+    "news_articles": [
+        # Existing rows came from RSS/Google News and therefore had explicit
+        # publication timestamps. Hot-list observations opt into "observed".
+        ("time_basis", "VARCHAR(20)", "'published'"),
+    ],
 }
 
 _INDEXES: list[tuple[str, str, str]] = [
